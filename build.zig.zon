@@ -1,0 +1,25 @@
+.{
+    .name = .fastblock,
+
+    .version = "0.0.0",
+
+    .fingerprint = 0xdd3ba9fbd17871c9,
+
+    .minimum_zig_version = "0.15.1",
+
+    .dependencies = .{
+        .picozig = .{
+            .path = "../zig-pico",
+        },
+        .libxev = .{
+            .url = "https://github.com/mitchellh/libxev/archive/refs/heads/master.tar.gz",
+            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
