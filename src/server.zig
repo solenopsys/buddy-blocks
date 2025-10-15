@@ -89,10 +89,9 @@ const Worker = struct {
 
     pub fn init(allocator: Allocator, id: usize, port: u16, buffer_size: usize, initial_pool_size: usize) !Worker {
         const server_socket = try createServerSocket(port);
-        var ring_params = std.mem.zeroes(linux.io_uring_params);
 
-        const ring_size: u13 = 4096;
-        const ring = try linux.IoUring.init_params(ring_size, &ring_params);
+        const ring_size: u13 = 256;
+        const ring = try linux.IoUring.init(ring_size, 0);
         const buffer_pool = try LocalBufferPool.init(allocator, initial_pool_size, buffer_size);
 
         return Worker{
@@ -201,10 +200,56 @@ const Worker = struct {
         // Проверяем полный HTTP запрос (конец заголовков)
         if (!client.is_complete) {
             if (std.mem.indexOf(u8, client.data.items, "\r\n\r\n")) |header_end| {
-                // Нашли конец заголовков, проверяем Content-Length
+                // Нашли конец заголовков
                 const headers = client.data.items[0..header_end];
 
-                if (std.mem.indexOf(u8, headers, "Content-Length:")) |cl_start| {
+                // Проверяем это PUT /block, GET /block или DELETE /block
+                const is_put_block = std.mem.startsWith(u8, client.data.items, "PUT /block");
+                const is_get_block = std.mem.startsWith(u8, client.data.items, "GET /block/");
+                const is_delete_block = std.mem.startsWith(u8, client.data.items, "DELETE /block/");
+
+                // Для DELETE /block не ждем body - сразу обрабатываем
+                if (is_delete_block) {
+                    client.is_complete = true;
+                    // Продолжаем обработку через httpHandler ниже
+                } else if (is_put_block) {
+                    if (std.mem.indexOf(u8, headers, "Content-Length:")) |cl_start| {
+                        const cl_line_start = cl_start + "Content-Length:".len;
+                        if (std.mem.indexOf(u8, headers[cl_line_start..], "\r\n")) |cl_line_end| {
+                            const cl_value = std.mem.trim(u8, headers[cl_line_start..][0..cl_line_end], " \t");
+                            const content_length = std.fmt.parseInt(u64, cl_value, 10) catch 0;
+
+                            if (content_length > 0) {
+                                // Проверяем, сколько body уже прочитано
+                                const body_start = header_end + 4;
+                                const body_received = if (client.data.items.len > body_start)
+                                    client.data.items.len - body_start
+                                else
+                                    0;
+
+                                // Если body уже полностью прочитан, используем обычный handler
+                                if (body_received >= content_length) {
+                                    client.is_complete = true;
+                                    // Продолжаем обработку через httpHandler ниже
+                                } else {
+                                    // Иначе используем streaming (но нужно учесть уже прочитанную часть!)
+                                    // TODO: Сейчас просто читаем весь body
+                                    const read_user_data = (1 << 32) | client_id;
+                                    _ = try self.ring.read(read_user_data, client.socket, .{ .buffer = client.buffer }, 0);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                } else if (is_get_block) {
+                    // Для GET /block используем streaming (не ждем body)
+                    try self.handleGetStreaming(client_id);
+                    return;
+                }
+
+                // Для остальных запросов продолжаем обычную логику (ждем body если есть Content-Length)
+                if (!is_delete_block) {
+                    if (std.mem.indexOf(u8, headers, "Content-Length:")) |cl_start| {
                     const cl_line_start = cl_start + "Content-Length:".len;
                     if (std.mem.indexOf(u8, headers[cl_line_start..], "\r\n")) |cl_line_end| {
                         const cl_value = std.mem.trim(u8, headers[cl_line_start..][0..cl_line_end], " \t");
@@ -221,6 +266,7 @@ const Worker = struct {
                             _ = try self.ring.read(read_user_data, client.socket, .{ .buffer = client.buffer }, 0);
                             return;
                         }
+                    }
                     }
                 }
 
@@ -278,6 +324,71 @@ const Worker = struct {
         }
 
         // Если клиент не хочет keep-alive, закрываем
+        if (!client.keep_alive) {
+            self.closeClient(client_id);
+            return;
+        }
+
+        // Сбрасываем состояние для следующего запроса
+        client.reset();
+
+        // Начинаем читать следующий запрос
+        const read_user_data = (1 << 32) | client_id;
+        _ = try self.ring.read(read_user_data, client.socket, .{ .buffer = client.buffer }, 0);
+    }
+
+    fn handlePutStreaming(self: *Worker, client_id: u64, content_length: u64) !void {
+        const client = self.clients.getPtr(client_id) orelse return;
+
+        // Вызываем streaming handler
+        const block_handlers = @import("./block_handlers.zig");
+        const response = block_handlers.handlePutStreaming(
+            client.socket,
+            content_length,
+            self.allocator,
+        ) catch |err| {
+            std.debug.print("Worker {d}: handlePutStreaming error: {any}\n", .{ self.id, err });
+            self.closeClient(client_id);
+            return;
+        };
+
+        // Отправляем ответ
+        const write_user_data = (2 << 32) | client_id;
+        _ = try self.ring.write(write_user_data, client.socket, response, 0);
+    }
+
+    fn handleGetStreaming(self: *Worker, client_id: u64) !void {
+        const client = self.clients.getPtr(client_id) orelse return;
+
+        // Извлекаем хеш из запроса: GET /block/<hash>
+        const request = client.data.items;
+        const path_start = std.mem.indexOf(u8, request, "GET /block/") orelse {
+            self.closeClient(client_id);
+            return;
+        };
+        const path_offset = path_start + "GET /block/".len;
+
+        // Находим конец пути (пробел или \r\n)
+        var hash_end = path_offset;
+        while (hash_end < request.len and
+               request[hash_end] != ' ' and
+               request[hash_end] != '\r') : (hash_end += 1) {}
+
+        const hash_hex = request[path_offset..hash_end];
+
+        // Вызываем streaming handler
+        const block_handlers = @import("./block_handlers.zig");
+        _ = block_handlers.handleGetStreaming(
+            client.socket,
+            hash_hex,
+            self.allocator,
+        ) catch |err| {
+            std.debug.print("Worker {d}: handleGetStreaming error: {any}\n", .{ self.id, err });
+            self.closeClient(client_id);
+            return;
+        };
+
+        // Данные уже отправлены через streaming, закрываем соединение
         if (!client.keep_alive) {
             self.closeClient(client_id);
             return;

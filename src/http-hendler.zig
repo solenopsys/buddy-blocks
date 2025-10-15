@@ -29,7 +29,7 @@ var handler_calls: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 // Глобальный processor (thread-local было бы лучше, но для простоты так)
 threadlocal var global_processor: ?HttpProcessor = null;
 
-pub fn httpHandler(allocator: std.mem.Allocator, data: []const u8) HandlerError![]const u8 {
+pub fn httpHandler(allocator: std.mem.Allocator, data: []const u8) anyerror![]const u8 {
     var timer = std.time.Timer.start() catch unreachable;
 
     var headers: [32]picozig.Header = undefined;
@@ -77,7 +77,7 @@ pub fn httpHandler(allocator: std.mem.Allocator, data: []const u8) HandlerError!
 
         // Регистрируем хендлеры (используем новые block_handlers с BlockController)
         try processor.addHandler(.{
-            .pathPrefix = "/block/",
+            .pathPrefix = "/block",
             .method = "PUT",
             .handleFn = block_handlers.handlePut,
         });

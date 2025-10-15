@@ -1,5 +1,5 @@
 const std = @import("std");
-const lmdbx = @import("lmdbx_wrapper.zig");
+pub const lmdbx = @import("lmdbx_wrapper.zig");
 const types = @import("types.zig");
 
 const BlockSize = types.BlockSize;
@@ -109,11 +109,11 @@ pub const BuddyAllocator = struct {
         try self.db.beginTransaction();
         errdefer self.db.abortTransaction();
 
-        // Check if block already exists
+        // Check if block already exists - if so, return existing metadata
         if (try self.db.get(self.allocator, &hash)) |existing| {
             defer self.allocator.free(existing);
             self.db.abortTransaction();
-            return BuddyAllocatorError.BlockAlreadyExists;
+            return try BlockMetadata.decode(existing);
         }
 
         // Determine required block size
@@ -123,7 +123,10 @@ pub const BuddyAllocator = struct {
         };
 
         // Allocate block
-        const metadata = try self.allocateBlockInternal(block_size);
+        var metadata = try self.allocateBlockInternal(block_size);
+
+        // Set actual data size
+        metadata.data_size = data_length;
 
         // Save metadata: hash -> BlockMetadata
         const encoded = metadata.encode();
@@ -207,6 +210,7 @@ pub const BuddyAllocator = struct {
                 .block_size = block_size,
                 .block_num = block_num,
                 .buddy_num = buddy_num,
+                .data_size = 0, // Will be set by caller
             };
         }
 
@@ -249,6 +253,7 @@ pub const BuddyAllocator = struct {
                     .block_size = current_size,
                     .block_num = block_num,
                     .buddy_num = if (block_num % 2 == 0) block_num + 1 else block_num - 1,
+                    .data_size = 0, // Will be set by caller
                 };
 
                 // Split down to target size
@@ -298,6 +303,7 @@ pub const BuddyAllocator = struct {
             .block_size = child_size,
             .block_num = parent.block_num * 2,
             .buddy_num = parent.block_num * 2 + 1,
+            .data_size = parent.data_size, // Inherit from parent
         };
 
         // Second buddy (right) - add to free list
@@ -305,6 +311,7 @@ pub const BuddyAllocator = struct {
             .block_size = child_size,
             .block_num = parent.block_num * 2 + 1,
             .buddy_num = parent.block_num * 2,
+            .data_size = 0, // Not used for free blocks
         };
 
         var key_buf: [64]u8 = undefined;
@@ -349,6 +356,7 @@ pub const BuddyAllocator = struct {
                     .block_size = parent_size,
                     .block_num = parent_num,
                     .buddy_num = parent_buddy,
+                    .data_size = 0, // Not used for free blocks
                 };
 
                 // Recursively try to merge further
@@ -368,3 +376,81 @@ pub const BuddyAllocator = struct {
         return metadata.block_num * metadata.block_size.toBytes();
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "BuddyAllocator: allocate and free 4KB block" {
+    const allocator = std.testing.allocator;
+
+    // Open test database
+    var db = try lmdbx.Database.open("/tmp/test-buddy-4kb.db");
+    defer db.close();
+
+    // Create simple file controller
+    var file_controller = SimpleFileController.init();
+
+    // Create buddy allocator
+    var buddy = try BuddyAllocator.init(allocator, &db, file_controller.interface());
+    defer buddy.deinit();
+
+    // Test allocate 4KB block
+    var hash: [32]u8 = undefined;
+    @memset(&hash, 0xAA);
+
+    const metadata = try buddy.allocate(hash, 4096);
+    try std.testing.expectEqual(BlockSize.size_4k, metadata.block_size);
+    try std.testing.expect(metadata.block_num >= 0);
+
+    // Check block exists
+    try std.testing.expect(try buddy.has(hash));
+
+    // Free block
+    try buddy.free(hash);
+
+    // Check block no longer exists
+    try std.testing.expect(!try buddy.has(hash));
+}
+
+test "BuddyAllocator: allocate multiple blocks" {
+    const allocator = std.testing.allocator;
+
+    var db = try lmdbx.Database.open("/tmp/test-buddy-multi.db");
+    defer db.close();
+
+    var file_controller = SimpleFileController.init();
+    var buddy = try BuddyAllocator.init(allocator, &db, file_controller.interface());
+    defer buddy.deinit();
+
+    // Allocate 3 different sized blocks
+    var hash1: [32]u8 = undefined;
+    @memset(&hash1, 0x11);
+    const meta1 = try buddy.allocate(hash1, 4096);
+    try std.testing.expectEqual(BlockSize.size_4k, meta1.block_size);
+
+    var hash2: [32]u8 = undefined;
+    @memset(&hash2, 0x22);
+    const meta2 = try buddy.allocate(hash2, 8192);
+    try std.testing.expectEqual(BlockSize.size_8k, meta2.block_size);
+
+    var hash3: [32]u8 = undefined;
+    @memset(&hash3, 0x33);
+    const meta3 = try buddy.allocate(hash3, 5000); // Should round up to 8KB
+    try std.testing.expectEqual(BlockSize.size_8k, meta3.block_size);
+
+    // All should exist
+    try std.testing.expect(try buddy.has(hash1));
+    try std.testing.expect(try buddy.has(hash2));
+    try std.testing.expect(try buddy.has(hash3));
+
+    // Free all
+    try buddy.free(hash1);
+    try buddy.free(hash2);
+    try buddy.free(hash3);
+
+    // None should exist
+    try std.testing.expect(!try buddy.has(hash1));
+    try std.testing.expect(!try buddy.has(hash2));
+    try std.testing.expect(!try buddy.has(hash3));
+}

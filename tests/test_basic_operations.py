@@ -10,7 +10,7 @@ data = b"A" * (4 * 1024)
 print(f"Отправка {len(data)} байт...")
 
 # PUT - отправить данные
-response = requests.put(f"{SERVER_URL}/block/", data=data)
+response = requests.put(f"{SERVER_URL}/block", data=data)
 print(f"PUT: {response.status_code}")
 hash_value = response.text.strip()
 print(f"Хеш: {hash_value}")

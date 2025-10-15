@@ -8,15 +8,19 @@ pub fn build(b: *std.Build) void {
     // Подключаем зависимости
     const libxev = b.dependency("libxev", .{});
     const picozig = b.dependency("picozig", .{});
+    const buddy_allocator_dep = b.dependency("buddy_allocator", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
-    const mod = b.addModule("fastblock", .{
+    const mod = b.addModule("buddy-blocks", .{
         .root_source_file = b.path("src/root.zig"),
 
         .target = target,
     });
 
     const exe = b.addExecutable(.{
-        .name = "fastblock",
+        .name = "buddy-blocks",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
 
@@ -24,9 +28,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
 
             .imports = &.{
-                .{ .name = "fastblock", .module = mod },
+                .{ .name = "buddy-blocks", .module = mod },
                 .{ .name = "xev", .module = libxev.module("xev") },
                 .{ .name = "picozig", .module = picozig.module("picozig") },
+                .{ .name = "buddy_allocator", .module = buddy_allocator_dep.module("buddy_allocator") },
             },
         }),
     });

@@ -2,6 +2,17 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    // Экспортируем buddy_allocator как модуль
+    const buddy_allocator_module = b.addModule("buddy_allocator", .{
+        .root_source_file = b.path("src/buddy_allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Добавляем include пути для lmdbx
+    buddy_allocator_module.addIncludePath(b.path("../../zig-lmdbx/libs/libmdbx"));
 
     // Benchmark
     const benchmark_exe = b.addExecutable(.{
@@ -25,4 +36,22 @@ pub fn build(b: *std.Build) void {
     const benchmark_cmd = b.addRunArtifact(benchmark_exe);
     benchmark_step.dependOn(&benchmark_cmd.step);
     benchmark_cmd.step.dependOn(b.getInstallStep());
+
+    // Tests
+    const test_exe = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/buddy_allocator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    test_exe.addLibraryPath(b.path("../../zig-lmdbx/zig-out/lib"));
+    test_exe.linkSystemLibrary("lmdbx");
+    test_exe.addIncludePath(b.path("../../zig-lmdbx/libs/libmdbx"));
+    test_exe.linkLibC();
+
+    const run_test = b.addRunArtifact(test_exe);
+    const test_step = b.step("test", "Run buddy allocator tests");
+    test_step.dependOn(&run_test.step);
 }

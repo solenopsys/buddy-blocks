@@ -162,34 +162,212 @@ pub const FileController = struct {
         try self.streamWrite(offset, data);
     }
 
-    /// Простой метод для чтения данных
-    pub fn read(self: *FileController, offset: u64, buffer: []u8) !void {
-        const read_buffer = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), buffer.len);
-        defer self.allocator.free(read_buffer);
+    /// Потоковое чтение через 4KB буферы
+    pub fn streamRead(self: *FileController, offset: u64, total_size: u64, output_buffer: []u8) !void {
+        var current_offset = std.mem.alignForward(u64, offset, PAGE_SIZE);
+        var remaining = total_size;
+        var output_pos: usize = 0;
 
-        const sqe = try self.ring.read(
-            0,
-            self.fd,
-            .{ .buffer = read_buffer },
-            offset,
-        );
-        _ = sqe;
-
-        _ = try self.ring.submit();
-        const cqe = try self.ring.copy_cqe();
-
-        if (cqe.res < 0) {
-            return error.ReadError;
+        // Создаём пул выровненных буферов для параллельного чтения
+        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
+        for (&buffers) |*buf| {
+            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
         }
+        defer for (buffers) |buf| self.allocator.free(buf);
 
-        const bytes_read: usize = @intCast(cqe.res);
-        @memcpy(buffer[0..@min(buffer.len, bytes_read)], read_buffer[0..@min(buffer.len, bytes_read)]);
+        var buffer_index: usize = 0;
+
+        while (remaining > 0) {
+            const chunk_size = @min(remaining, BUFFER_SIZE);
+            const buf = buffers[buffer_index % buffers.len];
+
+            // Готовим запрос на чтение
+            const sqe = try self.ring.read(
+                buffer_index,
+                self.fd,
+                .{ .buffer = buf },
+                current_offset,
+            );
+            _ = sqe;
+
+            current_offset += BUFFER_SIZE;
+            remaining -= chunk_size;
+            buffer_index += 1;
+
+            // Отправляем пакет запросов
+            if (buffer_index % buffers.len == 0 or remaining == 0) {
+                _ = try self.ring.submit();
+
+                // Собираем результаты и копируем данные
+                for (0..@min(buffer_index, buffers.len)) |i| {
+                    const cqe = try self.ring.copy_cqe();
+                    if (cqe.res <= 0) {
+                        return error.StreamReadError;
+                    }
+
+                    const bytes_read: usize = @intCast(cqe.res);
+                    const read_buf = buffers[i % buffers.len];
+
+                    const copy_size = @min(bytes_read, output_buffer.len - output_pos);
+                    @memcpy(output_buffer[output_pos..][0..copy_size], read_buf[0..copy_size]);
+                    output_pos += copy_size;
+                }
+
+                if (remaining > 0) {
+                    buffer_index = 0;
+                }
+            }
+        }
+    }
+
+    /// Простой метод для чтения данных (теперь использует streamRead)
+    pub fn read(self: *FileController, offset: u64, buffer: []u8) !void {
+        try self.streamRead(offset, buffer.len, buffer);
     }
 
     /// Расширить файл на указанное количество байтов
     pub fn extendFile(self: *FileController, bytes: u64) !void {
         const current_size = try self.getSizeInternal();
         try self.growFile(current_size + bytes);
+    }
+
+    /// Потоковое чтение из socket через 4KB буферы с вычислением хеша
+    pub fn streamSocketToFile(
+        self: *FileController,
+        socket_fd: std.posix.fd_t,
+        file_offset: u64,
+        total_size: u64,
+        hasher: ?*std.crypto.hash.sha2.Sha256,
+    ) !void {
+        var current_file_offset = std.mem.alignForward(u64, file_offset, PAGE_SIZE);
+        var remaining = total_size;
+
+        // Создаём пул выровненных буферов
+        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
+        for (&buffers) |*buf| {
+            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
+        }
+        defer for (buffers) |buf| self.allocator.free(buf);
+
+        var buffer_index: usize = 0;
+
+        while (remaining > 0) {
+            const buf = buffers[buffer_index % buffers.len];
+
+            // Читаем из socket через io_uring
+            const read_sqe = try self.ring.read(
+                (1 << 32) | buffer_index, // user_data: read operation
+                socket_fd,
+                .{ .buffer = buf },
+                0, // offset не используется для socket
+            );
+            _ = read_sqe;
+
+            _ = try self.ring.submit();
+            const read_cqe = try self.ring.copy_cqe();
+
+            if (read_cqe.res <= 0) {
+                return error.SocketReadError;
+            }
+
+            const bytes_read: usize = @intCast(read_cqe.res);
+
+            // Обновляем хеш если передан
+            if (hasher) |h| {
+                h.update(buf[0..bytes_read]);
+            }
+
+            // Дополняем буфер нулями до PAGE_SIZE если нужно
+            if (bytes_read < BUFFER_SIZE) {
+                @memset(buf[bytes_read..], 0);
+            }
+
+            // Пишем в файл через io_uring
+            const write_sqe = try self.ring.write(
+                (2 << 32) | buffer_index, // user_data: write operation
+                self.fd,
+                buf[0..BUFFER_SIZE],
+                current_file_offset,
+            );
+            _ = write_sqe;
+
+            _ = try self.ring.submit();
+            const write_cqe = try self.ring.copy_cqe();
+
+            if (write_cqe.res < 0) {
+                return error.FileWriteError;
+            }
+
+            current_file_offset += BUFFER_SIZE;
+            remaining -= bytes_read;
+            buffer_index += 1;
+        }
+    }
+
+    /// Потоковое чтение из файла в socket через 4KB буферы
+    pub fn streamFileToSocket(
+        self: *FileController,
+        socket_fd: std.posix.fd_t,
+        file_offset: u64,
+        total_size: u64,
+    ) !void {
+        var current_file_offset = std.mem.alignForward(u64, file_offset, PAGE_SIZE);
+        var remaining = total_size;
+        var bytes_sent: u64 = 0;
+
+        // Создаём пул выровненных буферов
+        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
+        for (&buffers) |*buf| {
+            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
+        }
+        defer for (buffers) |buf| self.allocator.free(buf);
+
+        var buffer_index: usize = 0;
+
+        while (remaining > 0) {
+            const chunk_size = @min(remaining, BUFFER_SIZE);
+            const buf = buffers[buffer_index % buffers.len];
+
+            // Читаем из файла через io_uring
+            const read_sqe = try self.ring.read(
+                (1 << 32) | buffer_index,
+                self.fd,
+                .{ .buffer = buf },
+                current_file_offset,
+            );
+            _ = read_sqe;
+
+            _ = try self.ring.submit();
+            const read_cqe = try self.ring.copy_cqe();
+
+            if (read_cqe.res <= 0) {
+                return error.FileReadError;
+            }
+
+            const bytes_read: usize = @intCast(read_cqe.res);
+            const actual_chunk = @min(bytes_read, chunk_size);
+
+            // Пишем в socket через io_uring
+            const write_sqe = try self.ring.write(
+                (2 << 32) | buffer_index,
+                socket_fd,
+                buf[0..actual_chunk],
+                0, // offset не используется для socket
+            );
+            _ = write_sqe;
+
+            _ = try self.ring.submit();
+            const write_cqe = try self.ring.copy_cqe();
+
+            if (write_cqe.res < 0) {
+                return error.SocketWriteError;
+            }
+
+            bytes_sent += actual_chunk;
+            current_file_offset += BUFFER_SIZE;
+            remaining -= actual_chunk;
+            buffer_index += 1;
+        }
     }
 
     /// Создать IFileController интерфейс для BuddyAllocator

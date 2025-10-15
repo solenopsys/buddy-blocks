@@ -1,4 +1,20 @@
 const std = @import("std");
+const picozig = @import("picozig").picozig;
+
+pub const HandlerError = error{
+    OutOfMemory,
+    InvalidRequest,
+    HandlerNotFound,
+    InternalError,
+};
+
+pub const HandlerFn = *const fn (picozig.HttpRequest, std.mem.Allocator) anyerror![]const u8;
+
+pub const ProtocolHandler = struct {
+    pathPrefix: []const u8,
+    method: []const u8,
+    handleFn: HandlerFn,
+};
 
 /// Block sizes - powers of 2 from 4KB to 1MB
 pub const BlockSize = enum(u64) {

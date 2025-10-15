@@ -86,19 +86,21 @@ pub const BlockMetadata = struct {
     block_size: BlockSize,
     block_num: u64,
     buddy_num: u64,
+    data_size: u64, // Actual size of data stored in the block
 
-    /// Encode metadata to 24 bytes for storage
-    pub fn encode(self: BlockMetadata) [24]u8 {
-        var result: [24]u8 = undefined;
+    /// Encode metadata to 32 bytes for storage
+    pub fn encode(self: BlockMetadata) [32]u8 {
+        var result: [32]u8 = undefined;
         std.mem.writeInt(u64, result[0..8], self.block_size.toBytes(), .little);
         std.mem.writeInt(u64, result[8..16], self.block_num, .little);
         std.mem.writeInt(u64, result[16..24], self.buddy_num, .little);
+        std.mem.writeInt(u64, result[24..32], self.data_size, .little);
         return result;
     }
 
-    /// Decode metadata from 24 bytes
+    /// Decode metadata from 32 bytes
     pub fn decode(data: []const u8) !BlockMetadata {
-        if (data.len != 24) return error.InvalidMetadataSize;
+        if (data.len != 32) return error.InvalidMetadataSize;
 
         const size_bytes = std.mem.readInt(u64, data[0..8], .little);
         const block_size = BlockSize.fromBytes(size_bytes) catch |err| {
@@ -109,6 +111,7 @@ pub const BlockMetadata = struct {
             .block_size = block_size,
             .block_num = std.mem.readInt(u64, data[8..16], .little),
             .buddy_num = std.mem.readInt(u64, data[16..24], .little),
+            .data_size = std.mem.readInt(u64, data[24..32], .little),
         };
     }
 };
@@ -201,6 +204,7 @@ test "BlockMetadata: encode and decode" {
         .block_size = .size_64k,
         .block_num = 123,
         .buddy_num = 122,
+        .data_size = 50000,
     };
 
     const encoded = original.encode();
@@ -209,20 +213,21 @@ test "BlockMetadata: encode and decode" {
     try std.testing.expectEqual(original.block_size, decoded.block_size);
     try std.testing.expectEqual(original.block_num, decoded.block_num);
     try std.testing.expectEqual(original.buddy_num, decoded.buddy_num);
+    try std.testing.expectEqual(original.data_size, decoded.data_size);
 }
 
 test "makeFreeListKey and parseFreeListKey" {
     var buffer: [64]u8 = undefined;
 
     const key1 = try makeFreeListKey(.size_4k, 123, &buffer);
-    try std.testing.expectEqualStrings("4k_123", key1);
+    try std.testing.expectEqualStrings("free_4k_123", key1);
 
     const parsed1 = try parseFreeListKey(key1);
     try std.testing.expectEqual(BlockSize.size_4k, parsed1.size);
     try std.testing.expectEqual(@as(u64, 123), parsed1.block_num);
 
     const key2 = try makeFreeListKey(.size_256k, 42, &buffer);
-    try std.testing.expectEqualStrings("256k_42", key2);
+    try std.testing.expectEqualStrings("free_256k_42", key2);
 
     const parsed2 = try parseFreeListKey(key2);
     try std.testing.expectEqual(BlockSize.size_256k, parsed2.size);

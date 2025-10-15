@@ -32,6 +32,10 @@ pub fn deinitDatabase() void {
     }
 }
 
+pub fn getDatabase() ?*anyopaque {
+    return db_handle;
+}
+
 // Вычисляем SHA256 хеш от данных
 fn computeHash(data: []const u8, hash_out: *[32]u8) void {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
