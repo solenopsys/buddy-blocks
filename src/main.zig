@@ -1,6 +1,5 @@
 const std = @import("std");
-const Server = @import("./server.zig").Server;
-const Thread = std.Thread;
+const Server = @import("./server_single.zig").Server;
 const block_handlers = @import("./block_handlers.zig");
 const BlockController = @import("./block_controller_adapter.zig").BlockController;
 const BuddyAllocator = @import("buddy_allocator").BuddyAllocator;
@@ -37,17 +36,12 @@ pub fn main() !void {
     // Регистрируем глобальный BlockController для handlers
     block_handlers.initBlockController(block_controller);
 
-    // Определяем количество воркеров
-    const num_workers: usize = 4;
-
-    std.debug.print("Starting server with {d} workers\n", .{num_workers});
-
-    // Создаем ОДИН сервер с num_workers потоками
-    var server = try Server.init(allocator, port, num_workers);
+    // Создаем single-threaded сервер
+    var server = try Server.init(allocator, port, file_controller.fd, block_controller);
     defer server.deinit();
 
-    // Запускаем сервер (он сам создаст workers)
-    try server.start();
+    // Запускаем event loop
+    try server.run();
 }
 
 test "simple test" {

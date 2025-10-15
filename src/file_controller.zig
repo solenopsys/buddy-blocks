@@ -4,16 +4,14 @@ const linux = os.linux;
 const buddy_mod = @import("buddy_allocator");
 const IFileController = buddy_mod.IFileController;
 
-/// Контроллер для быстрой работы с файлами через io_uring
+/// Контроллер для работы с файлами (только FD, без ring)
+/// Ring теперь принадлежит Worker и используется асинхронно
 pub const FileController = struct {
     fd: std.posix.fd_t,
-    ring: linux.IoUring,
     allocator: std.mem.Allocator,
 
     const PAGE_SIZE = 4096;
     const SSD_BLOCK_SIZE = 4096;
-    const BUFFER_SIZE = 4096;
-    const QUEUE_DEPTH = 64;
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileController {
         // Открываем или создаём файл с флагами для прямого I/O
@@ -28,19 +26,13 @@ pub const FileController = struct {
         );
         errdefer std.posix.close(fd);
 
-        // Инициализируем io_uring
-        var ring = try linux.IoUring.init(QUEUE_DEPTH, 0);
-        errdefer ring.deinit();
-
         return .{
             .fd = fd,
-            .ring = ring,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *FileController) void {
-        self.ring.deinit();
         std.posix.close(self.fd);
     }
 
@@ -62,312 +54,16 @@ pub const FileController = struct {
         }
     }
 
-    /// Записать данные через io_uring с выровненным буфером
-    pub fn writeAligned(self: *FileController, offset: u64, data: []const u8) !void {
-        // Выравниваем offset по границам страниц
-        const aligned_offset = std.mem.alignBackward(u64, offset, PAGE_SIZE);
-        const page_offset = offset - aligned_offset;
-
-        // Создаём выровненный буфер
-        const aligned_buffer = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
-        defer self.allocator.free(aligned_buffer);
-
-        // Копируем данные с учётом смещения
-        const write_size = @min(data.len, BUFFER_SIZE - page_offset);
-        @memcpy(aligned_buffer[page_offset..][0..write_size], data[0..write_size]);
-
-        // Подготавливаем запрос на запись
-        const sqe = try self.ring.write(
-            0, // user_data
-            self.fd,
-            aligned_buffer,
-            aligned_offset,
-        );
-        _ = sqe;
-
-        // Отправляем запрос
-        _ = try self.ring.submit();
-
-        // Ждём завершения
-        const cqe = try self.ring.copy_cqe();
-        if (cqe.res < 0) {
-            return error.WriteError;
-        }
-    }
-
-    /// Потоковая запись через 4KB буферы
-    pub fn streamWrite(self: *FileController, offset: u64, data: []const u8) !void {
-        var current_offset = std.mem.alignForward(u64, offset, PAGE_SIZE);
-        var remaining = data;
-        var buffer_index: usize = 0;
-
-        // Создаём пул выровненных буферов
-        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
-        for (&buffers) |*buf| {
-            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
-        }
-        defer for (buffers) |buf| self.allocator.free(buf);
-
-        while (remaining.len > 0) {
-            const chunk_size = @min(remaining.len, BUFFER_SIZE);
-            const buf = buffers[buffer_index % buffers.len];
-
-            // Копируем данные в выровненный буфер
-            @memcpy(buf[0..chunk_size], remaining[0..chunk_size]);
-            if (chunk_size < BUFFER_SIZE) {
-                @memset(buf[chunk_size..], 0);
-            }
-
-            // Готовим запрос
-            const sqe = try self.ring.write(
-                buffer_index,
-                self.fd,
-                buf[0..BUFFER_SIZE],
-                current_offset,
-            );
-            _ = sqe;
-
-            current_offset += BUFFER_SIZE;
-            remaining = remaining[chunk_size..];
-            buffer_index += 1;
-
-            // Отправляем пакет запросов
-            if (buffer_index % buffers.len == 0 or remaining.len == 0) {
-                _ = try self.ring.submit();
-
-                // Собираем результаты
-                for (0..@min(buffer_index, buffers.len)) |_| {
-                    const cqe = try self.ring.copy_cqe();
-                    if (cqe.res < 0) {
-                        return error.StreamWriteError;
-                    }
-                }
-
-                if (remaining.len > 0) {
-                    buffer_index = 0;
-                }
-            }
-        }
-    }
-
     /// Получить текущий размер файла
     pub fn getSizeInternal(self: *FileController) !u64 {
         const stat = try std.posix.fstat(self.fd);
         return @intCast(stat.size);
     }
 
-    /// Простой метод для записи данных (без io_uring, для начала)
-    pub fn write(self: *FileController, offset: u64, data: []const u8) !void {
-        // Используем streamWrite для записи
-        try self.streamWrite(offset, data);
-    }
-
-    /// Потоковое чтение через 4KB буферы
-    pub fn streamRead(self: *FileController, offset: u64, total_size: u64, output_buffer: []u8) !void {
-        var current_offset = std.mem.alignForward(u64, offset, PAGE_SIZE);
-        var remaining = total_size;
-        var output_pos: usize = 0;
-
-        // Создаём пул выровненных буферов для параллельного чтения
-        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
-        for (&buffers) |*buf| {
-            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
-        }
-        defer for (buffers) |buf| self.allocator.free(buf);
-
-        var buffer_index: usize = 0;
-
-        while (remaining > 0) {
-            const chunk_size = @min(remaining, BUFFER_SIZE);
-            const buf = buffers[buffer_index % buffers.len];
-
-            // Готовим запрос на чтение
-            const sqe = try self.ring.read(
-                buffer_index,
-                self.fd,
-                .{ .buffer = buf },
-                current_offset,
-            );
-            _ = sqe;
-
-            current_offset += BUFFER_SIZE;
-            remaining -= chunk_size;
-            buffer_index += 1;
-
-            // Отправляем пакет запросов
-            if (buffer_index % buffers.len == 0 or remaining == 0) {
-                _ = try self.ring.submit();
-
-                // Собираем результаты и копируем данные
-                for (0..@min(buffer_index, buffers.len)) |i| {
-                    const cqe = try self.ring.copy_cqe();
-                    if (cqe.res <= 0) {
-                        return error.StreamReadError;
-                    }
-
-                    const bytes_read: usize = @intCast(cqe.res);
-                    const read_buf = buffers[i % buffers.len];
-
-                    const copy_size = @min(bytes_read, output_buffer.len - output_pos);
-                    @memcpy(output_buffer[output_pos..][0..copy_size], read_buf[0..copy_size]);
-                    output_pos += copy_size;
-                }
-
-                if (remaining > 0) {
-                    buffer_index = 0;
-                }
-            }
-        }
-    }
-
-    /// Простой метод для чтения данных (теперь использует streamRead)
-    pub fn read(self: *FileController, offset: u64, buffer: []u8) !void {
-        try self.streamRead(offset, buffer.len, buffer);
-    }
-
     /// Расширить файл на указанное количество байтов
     pub fn extendFile(self: *FileController, bytes: u64) !void {
         const current_size = try self.getSizeInternal();
         try self.growFile(current_size + bytes);
-    }
-
-    /// Потоковое чтение из socket через 4KB буферы с вычислением хеша
-    pub fn streamSocketToFile(
-        self: *FileController,
-        socket_fd: std.posix.fd_t,
-        file_offset: u64,
-        total_size: u64,
-        hasher: ?*std.crypto.hash.sha2.Sha256,
-    ) !void {
-        var current_file_offset = std.mem.alignForward(u64, file_offset, PAGE_SIZE);
-        var remaining = total_size;
-
-        // Создаём пул выровненных буферов
-        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
-        for (&buffers) |*buf| {
-            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
-        }
-        defer for (buffers) |buf| self.allocator.free(buf);
-
-        var buffer_index: usize = 0;
-
-        while (remaining > 0) {
-            const buf = buffers[buffer_index % buffers.len];
-
-            // Читаем из socket через io_uring
-            const read_sqe = try self.ring.read(
-                (1 << 32) | buffer_index, // user_data: read operation
-                socket_fd,
-                .{ .buffer = buf },
-                0, // offset не используется для socket
-            );
-            _ = read_sqe;
-
-            _ = try self.ring.submit();
-            const read_cqe = try self.ring.copy_cqe();
-
-            if (read_cqe.res <= 0) {
-                return error.SocketReadError;
-            }
-
-            const bytes_read: usize = @intCast(read_cqe.res);
-
-            // Обновляем хеш если передан
-            if (hasher) |h| {
-                h.update(buf[0..bytes_read]);
-            }
-
-            // Дополняем буфер нулями до PAGE_SIZE если нужно
-            if (bytes_read < BUFFER_SIZE) {
-                @memset(buf[bytes_read..], 0);
-            }
-
-            // Пишем в файл через io_uring
-            const write_sqe = try self.ring.write(
-                (2 << 32) | buffer_index, // user_data: write operation
-                self.fd,
-                buf[0..BUFFER_SIZE],
-                current_file_offset,
-            );
-            _ = write_sqe;
-
-            _ = try self.ring.submit();
-            const write_cqe = try self.ring.copy_cqe();
-
-            if (write_cqe.res < 0) {
-                return error.FileWriteError;
-            }
-
-            current_file_offset += BUFFER_SIZE;
-            remaining -= bytes_read;
-            buffer_index += 1;
-        }
-    }
-
-    /// Потоковое чтение из файла в socket через 4KB буферы
-    pub fn streamFileToSocket(
-        self: *FileController,
-        socket_fd: std.posix.fd_t,
-        file_offset: u64,
-        total_size: u64,
-    ) !void {
-        var current_file_offset = std.mem.alignForward(u64, file_offset, PAGE_SIZE);
-        var remaining = total_size;
-        var bytes_sent: u64 = 0;
-
-        // Создаём пул выровненных буферов
-        var buffers: [4][]align(PAGE_SIZE) u8 = undefined;
-        for (&buffers) |*buf| {
-            buf.* = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(PAGE_SIZE), BUFFER_SIZE);
-        }
-        defer for (buffers) |buf| self.allocator.free(buf);
-
-        var buffer_index: usize = 0;
-
-        while (remaining > 0) {
-            const chunk_size = @min(remaining, BUFFER_SIZE);
-            const buf = buffers[buffer_index % buffers.len];
-
-            // Читаем из файла через io_uring
-            const read_sqe = try self.ring.read(
-                (1 << 32) | buffer_index,
-                self.fd,
-                .{ .buffer = buf },
-                current_file_offset,
-            );
-            _ = read_sqe;
-
-            _ = try self.ring.submit();
-            const read_cqe = try self.ring.copy_cqe();
-
-            if (read_cqe.res <= 0) {
-                return error.FileReadError;
-            }
-
-            const bytes_read: usize = @intCast(read_cqe.res);
-            const actual_chunk = @min(bytes_read, chunk_size);
-
-            // Пишем в socket через io_uring
-            const write_sqe = try self.ring.write(
-                (2 << 32) | buffer_index,
-                socket_fd,
-                buf[0..actual_chunk],
-                0, // offset не используется для socket
-            );
-            _ = write_sqe;
-
-            _ = try self.ring.submit();
-            const write_cqe = try self.ring.copy_cqe();
-
-            if (write_cqe.res < 0) {
-                return error.SocketWriteError;
-            }
-
-            bytes_sent += actual_chunk;
-            current_file_offset += BUFFER_SIZE;
-            remaining -= actual_chunk;
-            buffer_index += 1;
-        }
     }
 
     /// Создать IFileController интерфейс для BuddyAllocator
@@ -391,140 +87,3 @@ pub const FileController = struct {
         return self.extendFile(bytes);
     }
 };
-
-// ============================================================================
-// Тесты
-// ============================================================================
-
-test "FileController: init and deinit" {
-    const allocator = std.testing.allocator;
-    const test_path = "/tmp/test_file_controller_init.dat";
-
-    // Удаляем файл если существует
-    std.posix.unlink(test_path) catch {};
-
-    var controller = try FileController.init(allocator, test_path);
-    defer controller.deinit();
-    defer std.posix.unlink(test_path) catch {};
-
-    // Проверяем что файл создан
-    const size = try controller.getSizeInternal();
-    try std.testing.expectEqual(@as(u64, 0), size);
-}
-
-test "FileController: growFile" {
-    const allocator = std.testing.allocator;
-    const test_path = "/tmp/test_file_controller_grow.dat";
-
-    std.posix.unlink(test_path) catch {};
-
-    var controller = try FileController.init(allocator, test_path);
-    defer controller.deinit();
-    defer std.posix.unlink(test_path) catch {};
-
-    // Увеличиваем файл до 1MB
-    try controller.growFile(1024 * 1024);
-
-    const size = try controller.getSizeInternal();
-    try std.testing.expect(size >= 1024 * 1024);
-
-    // Увеличиваем ещё раз до 2MB
-    try controller.growFile(2 * 1024 * 1024);
-
-    const new_size = try controller.getSizeInternal();
-    try std.testing.expect(new_size >= 2 * 1024 * 1024);
-}
-
-test "FileController: streamWrite and read back" {
-    const allocator = std.testing.allocator;
-    const test_path = "/tmp/test_file_controller_stream.dat";
-
-    std.posix.unlink(test_path) catch {};
-
-    var controller = try FileController.init(allocator, test_path);
-    defer controller.deinit();
-    defer std.posix.unlink(test_path) catch {};
-
-    // Подготавливаем данные для записи (16KB)
-    const data_size = 16 * 1024;
-    const test_data = try allocator.alloc(u8, data_size);
-    defer allocator.free(test_data);
-
-    // Заполняем тестовыми данными
-    for (test_data, 0..) |*byte, i| {
-        byte.* = @intCast(i % 256);
-    }
-
-    // Расширяем файл
-    try controller.growFile(data_size);
-
-    // Записываем данные через streamWrite
-    try controller.streamWrite(0, test_data);
-
-    // Читаем обратно через прямой read
-    const read_buffer = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(4096), data_size);
-    defer allocator.free(read_buffer);
-
-    const sqe = try controller.ring.read(
-        0,
-        controller.fd,
-        .{ .buffer = read_buffer },
-        0,
-    );
-    _ = sqe;
-
-    _ = try controller.ring.submit();
-    const cqe = try controller.ring.copy_cqe();
-
-    try std.testing.expect(cqe.res > 0);
-
-    const bytes_read: usize = @intCast(cqe.res);
-    try std.testing.expect(bytes_read >= test_data.len);
-
-    // Проверяем что данные совпадают
-    try std.testing.expectEqualSlices(u8, test_data, read_buffer[0..test_data.len]);
-}
-
-test "FileController: multiple writes at different offsets" {
-    const allocator = std.testing.allocator;
-    const test_path = "/tmp/test_file_controller_offsets.dat";
-
-    std.posix.unlink(test_path) catch {};
-
-    var controller = try FileController.init(allocator, test_path);
-    defer controller.deinit();
-    defer std.posix.unlink(test_path) catch {};
-
-    // Расширяем файл до 64KB
-    try controller.growFile(64 * 1024);
-
-    // Пишем блок A на offset 0
-    const block_a = "AAAA" ** 1024; // 4KB
-    try controller.streamWrite(0, block_a);
-
-    // Пишем блок B на offset 8KB
-    const block_b = "BBBB" ** 1024; // 4KB
-    try controller.streamWrite(8 * 1024, block_b);
-
-    // Читаем блок A
-    const buffer_a = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(4096), 4096);
-    defer allocator.free(buffer_a);
-
-    _ = try controller.ring.read(0, controller.fd, .{ .buffer = buffer_a }, 0);
-    _ = try controller.ring.submit();
-    var cqe = try controller.ring.copy_cqe();
-    try std.testing.expect(cqe.res > 0);
-
-    // Читаем блок B
-    const buffer_b = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(4096), 4096);
-    defer allocator.free(buffer_b);
-
-    _ = try controller.ring.read(1, controller.fd, .{ .buffer = buffer_b }, 8 * 1024);
-    _ = try controller.ring.submit();
-    cqe = try controller.ring.copy_cqe();
-    try std.testing.expect(cqe.res > 0);
-
-    // Проверяем что данные правильные
-    try std.testing.expectEqualSlices(u8, block_a, buffer_a[0..block_a.len]);
-    try std.testing.expectEqualSlices(u8, block_b, buffer_b[0..block_b.len]);
-}
