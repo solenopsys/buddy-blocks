@@ -12,11 +12,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const spsc_queue = b.dependency("spsc_queue", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const mod = b.addModule("buddy-blocks", .{
         .root_source_file = b.path("src/root.zig"),
 
         .target = target,
+        .imports = &.{
+            .{ .name = "spsc_queue", .module = spsc_queue.module("spsc_queue") },
+        },
     });
 
     const exe = b.addExecutable(.{

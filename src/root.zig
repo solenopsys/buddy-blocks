@@ -1,23 +1,39 @@
 //! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
 
-pub fn bufferedPrint() !void {
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
+// Infrastructure
+pub const types = @import("infrastructure/types.zig");
+pub const buddy_allocator = @import("infrastructure/buddy_allocator.zig");
+pub const file_controller = @import("infrastructure/file_controller.zig");
+pub const lmdbx = @import("infrastructure/lmdbx.zig");
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+// Messaging
+pub const messages = @import("messaging/messages.zig");
+pub const message_queue = @import("messaging/message_queue.zig");
+pub const interfaces = @import("messaging/interfaces.zig");
 
-    try stdout.flush(); // Don't forget to flush!
-}
+// Controller
+pub const controller_handler = @import("controller/handler.zig");
+pub const controller = @import("controller/controller.zig");
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+// Worker
+pub const block_pool = @import("worker/block_pool.zig");
+pub const worker = @import("worker/worker.zig");
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+// Re-export for convenience
+pub const Message = messages.Message;
+pub const IMessageQueue = interfaces.IMessageQueue;
+pub const IControllerHandler = interfaces.IControllerHandler;
+pub const IBlockPool = interfaces.IBlockPool;
+pub const BlockInfo = interfaces.BlockInfo;
+
+// Test imports to trigger test discovery
+test {
+    std.testing.refAllDecls(@This());
+    _ = messages;
+    _ = message_queue;
+    _ = controller_handler;
+    _ = controller;
+    _ = block_pool;
+    _ = worker;
 }
