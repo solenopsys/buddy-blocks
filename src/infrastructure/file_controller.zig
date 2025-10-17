@@ -2,7 +2,8 @@ const std = @import("std");
 const os = std.os;
 const linux = os.linux;
 const buddy_mod = @import("buddy_allocator");
-const IFileController = buddy_mod.IFileController;
+// Use IFileController from buddy_allocator module
+pub const IFileController = buddy_mod.IFileController;
 
 /// Контроллер для работы с файлами (только FD, без ring)
 /// Ring теперь принадлежит Worker и используется асинхронно

@@ -56,6 +56,8 @@ pub const AllocateResult = struct {
 pub const OccupyResult = struct {
     worker_id: u8,
     request_id: u64,
+    offset: u64,
+    size: u64,
 };
 
 pub const ReleaseResult = struct {

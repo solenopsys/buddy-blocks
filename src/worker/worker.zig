@@ -16,6 +16,7 @@ const OP_READ: u64 = 1;
 const OP_WRITE: u64 = 2;
 const OP_FILE_READ: u64 = 3;
 const OP_FILE_WRITE: u64 = 4;
+const OP_PUT_WRITE: u64 = 5;
 
 const Client = struct {
     socket: posix.fd_t,
@@ -61,15 +62,28 @@ const FileTransfer = struct {
     }
 };
 
+const PutWrite = struct {
+    client_id: u64,
+    hash: [32]u8,
+    data: []u8,  // Owned copy of data
+    offset: u64,
+    allocator: Allocator,
+
+    fn deinit(self: *PutWrite) void {
+        self.allocator.free(self.data);
+    }
+};
+
 /// Pending request waiting for Controller response
 const PendingRequest = struct {
     request_id: u64,
     client_id: u64,
     request_type: RequestType,
+    hash: [32]u8 = [_]u8{0} ** 32, // Used for PUT/DELETE/GET requests
 
     const RequestType = enum {
         allocate, // PUT - ждем allocate_result с блоком
-        occupy, // PUT - ждем occupy_result (подтверждение)
+        occupy, // PUT - ждем occupy_result с offset для записи данных
         get_address, // GET - ждем get_address_result с offset/size
         release, // DELETE - ждем release_result
     };
@@ -82,8 +96,10 @@ pub const HttpWorker = struct {
     server_socket: posix.fd_t,
     clients: std.AutoHashMap(u64, *Client),
     file_transfers: std.AutoHashMap(u64, *FileTransfer),
+    put_writes: std.AutoHashMap(u64, *PutWrite),
     next_client_id: u64,
     next_transfer_id: u64,
+    next_put_write_id: u64,
     file_fd: posix.fd_t,
     port: u16,
 
@@ -123,8 +139,10 @@ pub const HttpWorker = struct {
             .server_socket = server_socket,
             .clients = std.AutoHashMap(u64, *Client).init(allocator),
             .file_transfers = std.AutoHashMap(u64, *FileTransfer).init(allocator),
+            .put_writes = std.AutoHashMap(u64, *PutWrite).init(allocator),
             .next_client_id = 1,
             .next_transfer_id = 1,
+            .next_put_write_id = 1,
             .file_fd = file_fd,
             .port = port,
             .block_pools = block_pools,
@@ -152,6 +170,13 @@ pub const HttpWorker = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.file_transfers.deinit();
+
+        var put_write_it = self.put_writes.iterator();
+        while (put_write_it.next()) |entry| {
+            entry.value_ptr.*.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.put_writes.deinit();
 
         self.pending_requests.deinit();
         self.ring.deinit();
@@ -198,6 +223,10 @@ pub const HttpWorker = struct {
                     self.handleFileWrite(id, cqe.res) catch |err| {
                         std.debug.print("Worker {d}: File write error for transfer {d}: {any}\n", .{ self.id, id, err });
                     };
+                } else if (op_type == OP_PUT_WRITE) {
+                    self.handlePutWrite(id, cqe.res) catch |err| {
+                        std.debug.print("Worker {d}: PUT write error for id {d}: {any}\n", .{ self.id, id, err });
+                    };
                 }
             }
 
@@ -208,7 +237,7 @@ pub const HttpWorker = struct {
             try self.refillPools();
 
             // Небольшая пауза чтобы не жечь CPU
-            std.time.sleep(100); // 100ns
+            std.Thread.sleep(100); // 100ns
         }
     }
 
@@ -263,19 +292,53 @@ pub const HttpWorker = struct {
                     }
                 },
                 .occupy_result => |result| {
-                    // Подтверждение occupy - отправляем ответ клиенту
+                    // Получили offset - запускаем async write через io_uring
                     if (self.pending_requests.get(result.request_id)) |pending| {
                         if (pending.request_type == .occupy) {
-                            // TODO: send success response to client
+                            const client = self.clients.getPtr(pending.client_id) orelse {
+                                _ = self.pending_requests.remove(result.request_id);
+                                return;
+                            };
+
+                            // Extract body from client data
+                            const request = client.*.data.items;
+                            const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
+                                _ = self.pending_requests.remove(result.request_id);
+                                return;
+                            };
+                            const body = request[body_start + 4 ..];
+
+                            // Create PutWrite with owned copy of data
+                            const put_write_id = self.next_put_write_id;
+                            self.next_put_write_id += 1;
+
+                            const put_write = try self.allocator.create(PutWrite);
+                            const data_copy = try self.allocator.alloc(u8, body.len);
+                            @memcpy(data_copy, body);
+
+                            put_write.* = .{
+                                .client_id = pending.client_id,
+                                .hash = pending.hash,
+                                .data = data_copy,
+                                .offset = result.offset,
+                                .allocator = self.allocator,
+                            };
+
+                            try self.put_writes.put(put_write_id, put_write);
+
+                            // Submit async write через io_uring
+                            const write_user_data = (OP_PUT_WRITE << 32) | put_write_id;
+                            _ = try self.ring.write(write_user_data, self.file_fd, data_copy, result.offset);
+
                             _ = self.pending_requests.remove(result.request_id);
                         }
                     }
                 },
                 .release_result => |result| {
-                    // Подтверждение release
+                    // Подтверждение release - отправляем успешный ответ
                     if (self.pending_requests.get(result.request_id)) |pending| {
                         if (pending.request_type == .release) {
-                            // TODO: send success response to client
+                            try self.sendDeleteSuccessResponse(pending.client_id);
                             _ = self.pending_requests.remove(result.request_id);
                         }
                     }
@@ -384,9 +447,59 @@ pub const HttpWorker = struct {
     }
 
     fn handlePutRequest(self: *HttpWorker, client_id: u64) !void {
-        // TODO: implement PUT logic with block pool + controller
-        _ = self;
-        _ = client_id;
+        const client = self.clients.getPtr(client_id) orelse return;
+        const request = client.*.data.items;
+
+        // Find body (after \r\n\r\n)
+        const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
+            try self.sendErrorResponse(client_id, .invalid_size);
+            return;
+        };
+        const body = request[body_start + 4 ..];
+
+        if (body.len == 0) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 10\r\n\r\nEmpty body";
+            const write_user_data = (OP_WRITE << 32) | client_id;
+            _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+            return;
+        }
+
+        // Check size limit (512KB)
+        if (body.len > 524288) {
+            const response = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 28\r\n\r\nPayload too large (max 512KB)";
+            const write_user_data = (OP_WRITE << 32) | client_id;
+            _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+            return;
+        }
+
+        // Compute SHA256 hash
+        var hash: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(body);
+        hasher.final(&hash);
+
+        // Send occupy request to Controller
+        const request_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        const msg = messages.Message{
+            .occupy_block = .{
+                .worker_id = self.id,
+                .request_id = request_id,
+                .hash = hash,
+                .data_size = body.len,
+            },
+        };
+
+        _ = self.to_controller.push(msg);
+
+        // Save pending request with hash and body pointer
+        try self.pending_requests.put(request_id, .{
+            .request_id = request_id,
+            .client_id = client_id,
+            .request_type = .occupy,
+            .hash = hash,
+        });
     }
 
     fn handleGetRequest(self: *HttpWorker, client_id: u64) !void {
@@ -435,9 +548,49 @@ pub const HttpWorker = struct {
     }
 
     fn handleDeleteRequest(self: *HttpWorker, client_id: u64) !void {
-        // TODO: implement DELETE logic
-        _ = self;
-        _ = client_id;
+        const client = self.clients.getPtr(client_id) orelse return;
+        const request = client.*.data.items;
+
+        // Extract hash from path: DELETE /block/<hash>
+        const path_start = std.mem.indexOf(u8, request, "DELETE /block/") orelse return error.InvalidRequest;
+        const path_offset = path_start + "DELETE /block/".len;
+
+        var hash_end = path_offset;
+        while (hash_end < request.len and request[hash_end] != ' ' and request[hash_end] != '\r') : (hash_end += 1) {}
+
+        const hash_hex = request[path_offset..hash_end];
+        if (hash_hex.len != 64) {
+            try self.sendErrorResponse(client_id, .invalid_size);
+            return;
+        }
+
+        var hash: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&hash, hash_hex) catch {
+            try self.sendErrorResponse(client_id, .invalid_size);
+            return;
+        };
+
+        // Send release request to Controller
+        const request_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        const msg = messages.Message{
+            .release_block = .{
+                .worker_id = self.id,
+                .request_id = request_id,
+                .hash = hash,
+            },
+        };
+
+        _ = self.to_controller.push(msg);
+
+        // Save pending request
+        try self.pending_requests.put(request_id, .{
+            .request_id = request_id,
+            .client_id = client_id,
+            .request_type = .release,
+            .hash = hash,
+        });
     }
 
     fn startFileTransfer(self: *HttpWorker, client_id: u64, offset: u64, size: u64) !void {
@@ -541,6 +694,36 @@ pub const HttpWorker = struct {
         }
     }
 
+    fn handlePutWrite(self: *HttpWorker, put_write_id: u64, result: i32) !void {
+        const put_write = self.put_writes.get(put_write_id) orelse return;
+
+        if (result < 0) {
+            // Write failed - send error
+            try self.sendErrorResponse(put_write.client_id, .internal_error);
+            self.cleanupPutWrite(put_write_id);
+            return;
+        }
+
+        const bytes_written: usize = @intCast(result);
+        if (bytes_written != put_write.data.len) {
+            // Partial write - send error
+            try self.sendErrorResponse(put_write.client_id, .internal_error);
+            self.cleanupPutWrite(put_write_id);
+            return;
+        }
+
+        // Write successful - send hash to client
+        try self.sendPutSuccessResponse(put_write.client_id, put_write.hash);
+        self.cleanupPutWrite(put_write_id);
+    }
+
+    fn cleanupPutWrite(self: *HttpWorker, put_write_id: u64) void {
+        if (self.put_writes.fetchRemove(put_write_id)) |entry| {
+            entry.value.deinit();
+            self.allocator.destroy(entry.value);
+        }
+    }
+
     fn closeClient(self: *HttpWorker, client_id: u64) void {
         if (self.clients.fetchRemove(client_id)) |entry| {
             posix.close(entry.value.socket);
@@ -560,6 +743,32 @@ pub const HttpWorker = struct {
             .internal_error => "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 14\r\n\r\nInternal error",
         };
 
+        const write_user_data = (OP_WRITE << 32) | client_id;
+        _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+    }
+
+    fn sendPutSuccessResponse(self: *HttpWorker, client_id: u64, hash: [32]u8) !void {
+        const client = self.clients.getPtr(client_id) orelse return;
+
+        // Convert hash to hex
+        const hex_hash = std.fmt.bytesToHex(hash, std.fmt.Case.lower);
+
+        // Send response with hash
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ hex_hash.len, hex_hash },
+        );
+        defer self.allocator.free(response);
+
+        const write_user_data = (OP_WRITE << 32) | client_id;
+        _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+    }
+
+    fn sendDeleteSuccessResponse(self: *HttpWorker, client_id: u64) !void {
+        const client = self.clients.getPtr(client_id) orelse return;
+
+        const response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nBlock deleted";
         const write_user_data = (OP_WRITE << 32) | client_id;
         _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
     }
@@ -650,8 +859,10 @@ test "HttpWorker - refillPools отправляет allocate запросы" {
         .server_socket = undefined,
         .clients = std.AutoHashMap(u64, *Client).init(testing.allocator),
         .file_transfers = std.AutoHashMap(u64, *FileTransfer).init(testing.allocator),
+        .put_writes = std.AutoHashMap(u64, *PutWrite).init(testing.allocator),
         .next_client_id = 1,
         .next_transfer_id = 1,
+        .next_put_write_id = 1,
         .file_fd = undefined,
         .port = 10001,
         .block_pools = pools,
@@ -663,6 +874,7 @@ test "HttpWorker - refillPools отправляет allocate запросы" {
     };
     defer worker.clients.deinit();
     defer worker.file_transfers.deinit();
+    defer worker.put_writes.deinit();
     defer worker.pending_requests.deinit();
 
     // Вызываем refillPools
@@ -706,8 +918,10 @@ test "HttpWorker - checkControllerMessages обрабатывает allocate_res
         .server_socket = undefined,
         .clients = std.AutoHashMap(u64, *Client).init(testing.allocator),
         .file_transfers = std.AutoHashMap(u64, *FileTransfer).init(testing.allocator),
+        .put_writes = std.AutoHashMap(u64, *PutWrite).init(testing.allocator),
         .next_client_id = 1,
         .next_transfer_id = 1,
+        .next_put_write_id = 1,
         .file_fd = undefined,
         .port = 10001,
         .block_pools = pools,
@@ -719,6 +933,7 @@ test "HttpWorker - checkControllerMessages обрабатывает allocate_res
     };
     defer worker.clients.deinit();
     defer worker.file_transfers.deinit();
+    defer worker.put_writes.deinit();
     defer worker.pending_requests.deinit();
 
     // Отправляем allocate_result в очередь from_controller
@@ -764,8 +979,10 @@ test "HttpWorker - checkControllerMessages обрабатывает error_result
         .server_socket = undefined,
         .clients = std.AutoHashMap(u64, *Client).init(testing.allocator),
         .file_transfers = std.AutoHashMap(u64, *FileTransfer).init(testing.allocator),
+        .put_writes = std.AutoHashMap(u64, *PutWrite).init(testing.allocator),
         .next_client_id = 1,
         .next_transfer_id = 1,
+        .next_put_write_id = 1,
         .file_fd = undefined,
         .port = 10001,
         .block_pools = pools,
@@ -777,6 +994,7 @@ test "HttpWorker - checkControllerMessages обрабатывает error_result
     };
     defer worker.clients.deinit();
     defer worker.file_transfers.deinit();
+    defer worker.put_writes.deinit();
     defer worker.pending_requests.deinit();
 
     // Добавляем pending request
@@ -824,8 +1042,10 @@ test "HttpWorker - pending requests добавление и удаление" {
         .server_socket = undefined,
         .clients = std.AutoHashMap(u64, *Client).init(testing.allocator),
         .file_transfers = std.AutoHashMap(u64, *FileTransfer).init(testing.allocator),
+        .put_writes = std.AutoHashMap(u64, *PutWrite).init(testing.allocator),
         .next_client_id = 1,
         .next_transfer_id = 1,
+        .next_put_write_id = 1,
         .file_fd = undefined,
         .port = 10001,
         .block_pools = pools,
@@ -837,6 +1057,7 @@ test "HttpWorker - pending requests добавление и удаление" {
     };
     defer worker.clients.deinit();
     defer worker.file_transfers.deinit();
+    defer worker.put_writes.deinit();
     defer worker.pending_requests.deinit();
 
     // Добавляем несколько pending requests

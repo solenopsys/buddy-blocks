@@ -55,16 +55,18 @@ pub const BuddyControllerHandler = struct {
         };
     }
 
-    fn handleOccupyImpl(ptr: *anyopaque, msg: messages.OccupyRequest) !void {
+    fn handleOccupyImpl(ptr: *anyopaque, msg: messages.OccupyRequest) !messages.OccupyResult {
         const self: *BuddyControllerHandler = @ptrCast(@alignCast(ptr));
 
-        // NOTE: Текущая реализация просто вызывает allocate()
-        // Это работает для совместимости со старым API
-        // В будущем нужно будет:
-        // 1. Найти резервный блок по worker_id+request_id
-        // 2. Удалить резервный хеш
-        // 3. Записать реальный хеш с теми же metadata
-        _ = try self.buddy_allocator.allocate(msg.hash, msg.data_size);
+        // Выделяем блок с реальным хешом
+        const metadata = try self.buddy_allocator.allocate(msg.hash, msg.data_size);
+
+        return .{
+            .worker_id = msg.worker_id,
+            .request_id = msg.request_id,
+            .offset = BuddyAllocator.getOffset(metadata),
+            .size = metadata.data_size,
+        };
     }
 
     fn handleReleaseImpl(ptr: *anyopaque, msg: messages.ReleaseRequest) !void {
@@ -137,9 +139,15 @@ pub const MockControllerHandler = struct {
         return self.allocate_response orelse error.NotConfigured;
     }
 
-    fn handleOccupyImpl(ptr: *anyopaque, msg: messages.OccupyRequest) !void {
+    fn handleOccupyImpl(ptr: *anyopaque, msg: messages.OccupyRequest) !messages.OccupyResult {
         const self: *MockControllerHandler = @ptrCast(@alignCast(ptr));
         self.last_occupy = msg;
+        return .{
+            .worker_id = msg.worker_id,
+            .request_id = msg.request_id,
+            .offset = 0,
+            .size = msg.data_size,
+        };
     }
 
     fn handleReleaseImpl(ptr: *anyopaque, msg: messages.ReleaseRequest) !void {
@@ -202,7 +210,7 @@ test "MockControllerHandler - occupy" {
         .data_size = 1024,
     };
 
-    try iface.handleOccupy(request);
+    _ = try iface.handleOccupy(request);
 
     // Проверяем что запрос был записан
     try testing.expect(handler.last_occupy != null);

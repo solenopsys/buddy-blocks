@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "spsc_queue", .module = spsc_queue.module("spsc_queue") },
+            .{ .name = "buddy_allocator", .module = buddy_allocator_dep.module("buddy_allocator") },
         },
     });
 

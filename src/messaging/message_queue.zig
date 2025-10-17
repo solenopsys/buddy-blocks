@@ -8,9 +8,9 @@ const spsc = @import("spsc_queue");
 pub const RealMessageQueue = struct {
     queue: spsc.SpscQueue(messages.Message, true), // enforce_po2 = true для скорости
 
-    pub fn init(allocator: std.mem.Allocator) !RealMessageQueue {
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !RealMessageQueue {
         return .{
-            .queue = try spsc.SpscQueue(messages.Message, true).initCapacity(allocator, 4096),
+            .queue = try spsc.SpscQueue(messages.Message, true).initCapacity(allocator, capacity),
         };
     }
 
@@ -103,7 +103,7 @@ pub const MockMessageQueue = struct {
 const testing = std.testing;
 
 test "RealMessageQueue - basic push/pop" {
-    var queue = try RealMessageQueue.init(testing.allocator);
+    var queue = try RealMessageQueue.init(testing.allocator, 4096);
     defer queue.deinit();
     const iface = queue.interface();
 
@@ -130,7 +130,7 @@ test "RealMessageQueue - basic push/pop" {
 }
 
 test "RealMessageQueue - FIFO order" {
-    var queue = try RealMessageQueue.init(testing.allocator);
+    var queue = try RealMessageQueue.init(testing.allocator, 4096);
     defer queue.deinit();
     const iface = queue.interface();
 
@@ -180,7 +180,7 @@ test "RealMessageQueue - FIFO order" {
 }
 
 test "RealMessageQueue - empty queue" {
-    var queue = try RealMessageQueue.init(testing.allocator);
+    var queue = try RealMessageQueue.init(testing.allocator, 4096);
     defer queue.deinit();
     const iface = queue.interface();
 
@@ -257,7 +257,7 @@ test "MockMessageQueue - multiple messages" {
 test "Interface compatibility - Real and Mock work the same" {
     // Test с RealMessageQueue
     {
-        var queue = try RealMessageQueue.init(testing.allocator);
+        var queue = try RealMessageQueue.init(testing.allocator, 4096);
         defer queue.deinit();
         const iface = queue.interface();
 

@@ -80,7 +80,7 @@ pub const BatchController = struct {
             const elapsed = now - self.before_run;
             if (elapsed < self.cycle_interval_ns) {
                 const sleep_ns = self.cycle_interval_ns - elapsed;
-                std.time.sleep(@intCast(sleep_ns));
+                std.Thread.sleep(@intCast(sleep_ns));
             }
             self.before_run = std.time.nanoTimestamp();
 
@@ -168,7 +168,7 @@ pub const BatchController = struct {
 
         // 4. Occupy - занимаем блоки реальными данными
         for (self.occupy_requests.items) |req| {
-            self.message_handler.handleOccupy(req) catch |err| {
+            const result = self.message_handler.handleOccupy(req) catch |err| {
                 try self.error_results.append(self.allocator, .{
                     .worker_id = req.worker_id,
                     .request_id = req.request_id,
@@ -176,10 +176,7 @@ pub const BatchController = struct {
                 });
                 continue;
             };
-            try self.occupy_results.append(self.allocator, .{
-                .worker_id = req.worker_id,
-                .request_id = req.request_id,
-            });
+            try self.occupy_results.append(self.allocator, result);
         }
         self.occupy_requests.clearRetainingCapacity();
     }

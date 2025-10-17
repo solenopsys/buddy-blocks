@@ -32,7 +32,7 @@ pub const IControllerHandler = struct {
 
     pub const VTable = struct {
         handle_allocate: *const fn (ptr: *anyopaque, msg: messages.AllocateRequest) anyerror!messages.AllocateResult,
-        handle_occupy: *const fn (ptr: *anyopaque, msg: messages.OccupyRequest) anyerror!void,
+        handle_occupy: *const fn (ptr: *anyopaque, msg: messages.OccupyRequest) anyerror!messages.OccupyResult,
         handle_release: *const fn (ptr: *anyopaque, msg: messages.ReleaseRequest) anyerror!void,
         handle_get_address: *const fn (ptr: *anyopaque, msg: messages.GetAddressRequest) anyerror!messages.GetAddressResult,
     };
@@ -41,7 +41,7 @@ pub const IControllerHandler = struct {
         return self.vtable.handle_allocate(self.ptr, msg);
     }
 
-    pub fn handleOccupy(self: IControllerHandler, msg: messages.OccupyRequest) !void {
+    pub fn handleOccupy(self: IControllerHandler, msg: messages.OccupyRequest) !messages.OccupyResult {
         return self.vtable.handle_occupy(self.ptr, msg);
     }
 

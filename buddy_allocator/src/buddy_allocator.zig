@@ -1,6 +1,6 @@
 const std = @import("std");
 pub const lmdbx = @import("lmdbx_wrapper.zig");
-const types = @import("types.zig");
+pub const types = @import("types.zig");
 
 const BlockSize = types.BlockSize;
 const BlockMetadata = types.BlockMetadata;

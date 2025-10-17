@@ -5,7 +5,10 @@ const std = @import("std");
 pub const types = @import("infrastructure/types.zig");
 pub const buddy_allocator = @import("infrastructure/buddy_allocator.zig");
 pub const file_controller = @import("infrastructure/file_controller.zig");
-pub const lmdbx = @import("infrastructure/lmdbx.zig");
+
+// Use lmdbx from buddy_allocator module instead of local implementation
+const buddy_mod = @import("buddy_allocator");
+pub const lmdbx = buddy_mod.lmdbx;
 
 // Messaging
 pub const messages = @import("messaging/messages.zig");
