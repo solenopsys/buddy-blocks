@@ -144,8 +144,6 @@ const MessageFromController = union(enum) {
   - `MessageFromController` (результаты + error)
   - `AllocateRequest`, `OccupyRequest`, `ReleaseRequest`, `GetAddressRequest`
   - `AllocateResult`, `GetAddressResult`
-- [ ] Реализовать `serialize()` и `deserialize()` для каждого типа
-- [ ] Написать тесты для сериализации/десериализации
 
 **Результат:** Работающие типы данных с полным покрытием тестами.
 
