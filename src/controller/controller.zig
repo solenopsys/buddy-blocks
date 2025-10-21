@@ -3,6 +3,7 @@ const messages = @import("../messaging/messages.zig");
 const interfaces = @import("../messaging/interfaces.zig");
 const IControllerHandler = interfaces.IControllerHandler;
 const IMessageQueue = interfaces.IMessageQueue;
+const PauseRegulator = @import("pause_regulator.zig").PauseRegulator;
 
 /// Пара очередей для коммуникации с одним worker'ом
 pub const WorkerQueues = struct {
@@ -29,9 +30,8 @@ pub const BatchController = struct {
     get_address_results: std.ArrayList(messages.GetAddressResult),
     error_results: std.ArrayList(messages.ErrorResult),
 
-    // Для динамической паузы
-    before_run: i128,
-    cycle_interval_ns: i128,
+    // Регулятор пауз
+    pause_regulator: PauseRegulator,
 
     // Флаг работы
     running: std.atomic.Value(bool),
@@ -42,6 +42,7 @@ pub const BatchController = struct {
         worker_queues: []WorkerQueues,
         cycle_interval_ns: i128,
     ) !BatchController {
+        _ = cycle_interval_ns;
         return .{
             .allocator = allocator,
             .message_handler = message_handler,
@@ -55,8 +56,7 @@ pub const BatchController = struct {
             .release_results = .{},
             .get_address_results = .{},
             .error_results = .{},
-            .before_run = std.time.nanoTimestamp(),
-            .cycle_interval_ns = cycle_interval_ns,
+            .pause_regulator = PauseRegulator.init(),
             .running = std.atomic.Value(bool).init(true),
         };
     }
@@ -75,18 +75,6 @@ pub const BatchController = struct {
 
     pub fn run(self: *BatchController) !void {
         while (self.running.load(.monotonic)) {
-            // Вычисляем сколько прошло с прошлого цикла
-            const now = std.time.nanoTimestamp();
-            const elapsed = now - self.before_run;
-
-            // Если прошло меньше интервала - спим на остаток
-            if (elapsed < self.cycle_interval_ns) {
-                const sleep_ns = self.cycle_interval_ns - elapsed;
-                std.Thread.sleep(@intCast(sleep_ns));
-            }
-            // Обновляем время начала цикла НА now (не на новый timestamp!)
-            self.before_run = now;
-
             // Шаг 1: Собрать все сообщения из входящих очередей
             try self.collectMessages();
 
@@ -95,6 +83,15 @@ pub const BatchController = struct {
 
             // Шаг 3: Отправить результаты
             try self.sendResults();
+
+            // Обновляем паузу редко (раз в 1000 итераций)
+            self.pause_regulator.tryUpdate();
+
+            // Адаптивная пауза на основе сохраненного значения
+            const pause_ns = self.pause_regulator.getPause();
+            if (pause_ns > 0) {
+                std.Thread.sleep(pause_ns);
+            }
         }
     }
 
@@ -107,6 +104,7 @@ pub const BatchController = struct {
         for (self.worker_queues) |queues| {
             var msg: messages.Message = undefined;
             while (queues.from_worker.pop(&msg)) {
+                self.pause_regulator.increment(); // Инкрементируем счетчик для каждого входящего сообщения
                 switch (msg) {
                     .allocate_block => |req| try self.allocate_requests.append(self.allocator, req),
                     .occupy_block => |req| try self.occupy_requests.append(self.allocator, req),

@@ -198,22 +198,11 @@ pub const HttpWorker = struct {
         _ = try self.ring.accept(accept_user_data, self.server_socket, null, null, 0);
 
         while (self.running.load(.monotonic)) {
-            // Вычисляем сколько прошло с прошлого цикла
-            const now = std.time.nanoTimestamp();
-            const elapsed = now - self.before_run;
+            // Используем submit_and_wait с минимальным ожиданием 1 события
+            // Это блокирует выполнение пока не появится хотя бы одно событие
+            _ = try self.ring.submit_and_wait(1);
 
-            // Если прошло меньше интервала - спим на остаток
-            if (elapsed < self.cycle_interval_ns) {
-                const sleep_ns = self.cycle_interval_ns - elapsed;
-                std.Thread.sleep(@intCast(sleep_ns));
-            }
-            // Обновляем время начала цикла НА now
-            self.before_run = now;
-
-            // Non-blocking submit (submit=0 означает не ждать)
-            _ = try self.ring.submit();
-
-            // Обрабатываем готовые CQE
+            // Обрабатываем все готовые CQE
             while (self.ring.cq_ready() > 0) {
                 const cqe = try self.ring.copy_cqe();
 
@@ -902,6 +891,8 @@ test "HttpWorker - refillPools отправляет allocate запросы" {
         .from_controller = from_controller_mock.interface(),
         .pending_requests = std.AutoHashMap(u64, PendingRequest).init(testing.allocator),
         .next_request_id = 1,
+        .before_run = 0,
+        .cycle_interval_ns = 100_000,
         .running = std.atomic.Value(bool).init(true),
     };
     defer worker.clients.deinit();
@@ -961,6 +952,8 @@ test "HttpWorker - checkControllerMessages обрабатывает allocate_res
         .from_controller = from_controller_mock.interface(),
         .pending_requests = std.AutoHashMap(u64, PendingRequest).init(testing.allocator),
         .next_request_id = 1,
+        .before_run = 0,
+        .cycle_interval_ns = 100_000,
         .running = std.atomic.Value(bool).init(true),
     };
     defer worker.clients.deinit();
@@ -1022,6 +1015,8 @@ test "HttpWorker - checkControllerMessages обрабатывает error_result
         .from_controller = from_controller_mock.interface(),
         .pending_requests = std.AutoHashMap(u64, PendingRequest).init(testing.allocator),
         .next_request_id = 1,
+        .before_run = 0,
+        .cycle_interval_ns = 100_000,
         .running = std.atomic.Value(bool).init(true),
     };
     defer worker.clients.deinit();
@@ -1085,6 +1080,8 @@ test "HttpWorker - pending requests добавление и удаление" {
         .from_controller = from_controller_mock.interface(),
         .pending_requests = std.AutoHashMap(u64, PendingRequest).init(testing.allocator),
         .next_request_id = 1,
+        .before_run = 0,
+        .cycle_interval_ns = 100_000,
         .running = std.atomic.Value(bool).init(true),
     };
     defer worker.clients.deinit();
@@ -1151,8 +1148,10 @@ test "HttpWorker - multiple refillPools calls не дублируют запро
         .server_socket = undefined,
         .clients = std.AutoHashMap(u64, *Client).init(testing.allocator),
         .file_transfers = std.AutoHashMap(u64, *FileTransfer).init(testing.allocator),
+        .put_writes = std.AutoHashMap(u64, *PutWrite).init(testing.allocator),
         .next_client_id = 1,
         .next_transfer_id = 1,
+        .next_put_write_id = 1,
         .file_fd = undefined,
         .port = 10001,
         .block_pools = pools,
@@ -1160,10 +1159,13 @@ test "HttpWorker - multiple refillPools calls не дублируют запро
         .from_controller = from_controller_mock.interface(),
         .pending_requests = std.AutoHashMap(u64, PendingRequest).init(testing.allocator),
         .next_request_id = 1,
+        .before_run = 0,
+        .cycle_interval_ns = 100_000,
         .running = std.atomic.Value(bool).init(true),
     };
     defer worker.clients.deinit();
     defer worker.file_transfers.deinit();
+    defer worker.put_writes.deinit();
     defer worker.pending_requests.deinit();
 
     // Первый вызов refillPools
