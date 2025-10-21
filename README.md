@@ -1,78 +1,124 @@
 # Buddy Blocks Storage Server
 
-Высокопроизводительный HTTP-сервер для хранения блоков данных с использованием io_uring и buddy allocator.
+High-performance HTTP server for block data storage using io_uring, lock-free queues, and buddy allocator.
 
-## Особенности
+## Features
 
-- **Потоковая передача через io_uring**: Все операции чтения/записи файлов выполняются через буферы 4KB с использованием io_uring ядра Linux
-- **Zero-copy архитектура**: Данные передаются напрямую socket → file и file → socket без полной загрузки в RAM
-- **Buddy Allocator**: Эффективное управление блоками данных размером от 4KB до 1MB
-- **LMDBX**: Быстрая база данных для хранения метаданных блоков
-- **Multi-threaded**: Несколько worker-потоков с SO_REUSEPORT для максимальной производительности
+- **io_uring**: Asynchronous I/O for maximum performance
+- **Lock-free architecture**: SPSC queues for inter-thread communication without locks
+- **Buddy Allocator**: Efficient management of data blocks from 4KB to 512KB
+- **LMDBX**: Fast database for storing block metadata
+- **Multi-threaded**: Multiple HTTP worker threads with SO_REUSEPORT + single controller thread
+- **Batch processing**: Controller processes requests in batches to minimize DB operations
 
-## Требования
+## Requirements
 
-- Zig 0.15.1 или новее
-- Linux с поддержкой io_uring (kernel 5.1+)
-- liblmdbx
+- Zig 0.15.1 or newer
+- Linux with io_uring support (kernel 5.1+)
+- liblmdbx (built automatically from zig-lmdbx dependency)
 
-## Сборка
+## Building
+
+### Building for host (GNU/Linux)
 
 ```bash
-# Клонируйте зависимости
+# Clone dependencies
 git clone https://github.com/your-repo/zig-lmdbx ../zig-lmdbx
 git clone https://github.com/your-repo/zig-pico ../zig-pico
 
-# Соберите liblmdbx
+# Build liblmdbx for all architectures
 cd ../zig-lmdbx
-zig build
+zig build -Dall=true
 cd ../buddy-blocks
 
-# Соберите сервер
-zig build
+# Build server for GNU (default)
+zig build -Doptimize=ReleaseFast
+
+# Binary: zig-out/bin/buddy-blocks-gnu
 ```
 
-## Запуск
-
-### Запуск HTTP сервера
+### Building for Alpine/musl
 
 ```bash
-# Запуск сервера на порту 10001 с 4 worker-потоками
+# Build for musl
+zig build -Dmusl=true -Doptimize=ReleaseFast
+
+# Binary: zig-out/bin/buddy-blocks-musl
+```
+
+### Building container (Podman/Docker)
+
+```bash
+# Build both binaries
+zig build -Doptimize=ReleaseFast
+zig build -Dmusl=true -Doptimize=ReleaseFast
+
+# Build container
+podman build -t buddy-blocks:latest .
+# or
+docker build -t buddy-blocks:latest .
+```
+
+## Running
+
+### Running on host
+
+```bash
+# Run GNU version
+LD_LIBRARY_PATH=../zig-lmdbx/zig-out/lib ./zig-out/bin/buddy-blocks-gnu
+
+# Or via zig build
 zig build run
 ```
 
-Или после сборки:
+Server will listen on `0.0.0.0:10001`
+
+### Running in container
 
 ```bash
-./zig-out/bin/buddy-blocks
+# Run with privileges (required for io_uring)
+podman run -d --name buddy-blocks \
+  --privileged \
+  -p 10001:10001 \
+  buddy-blocks:latest
+
+# Or with Docker
+docker run -d --name buddy-blocks \
+  --privileged \
+  -p 10001:10001 \
+  buddy-blocks:latest
 ```
 
-Сервер будет слушать на `0.0.0.0:10001`
+**Important**: The `--privileged` flag is required for io_uring to work in containers.
 
-### Запуск benchmark для buddy_allocator
+### Checking operation
 
 ```bash
-cd buddy_allocator
-zig build benchmark
-```
+# Check logs
+podman logs buddy-blocks
 
-Это запустит тесты производительности buddy allocator с различными размерами блоков.
+# Test PUT request
+curl -X PUT http://localhost:10001/block -d "test data"
+
+# Get block by hash
+curl http://localhost:10001/block/<hash>
+```
 
 ## API
 
-### PUT /block - Загрузка блока
+### PUT /block - Upload block
 
-Загружает блок данных и возвращает SHA256 хеш.
+Uploads a data block and returns SHA256 hash.
 
 ```bash
-# Загрузка файла
+# Upload file
 curl -X PUT --data-binary @file.bin http://localhost:10001/block
 
-# Загрузка текстовых данных
+# Upload text data
 echo "Hello, World!" | curl -X PUT --data-binary @- http://localhost:10001/block
 ```
 
-**Ответ:**
+**Response:**
 ```
 HTTP/1.1 200 OK
 Content-Type: text/plain
@@ -80,19 +126,18 @@ Content-Type: text/plain
 a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
 ```
 
-**Ограничения:**
-- Максимальный размер блока: 512KB
-- Данные передаются потоково через буферы 4KB
+**Limitations:**
+- Maximum block size: 512KB
 
-### GET /block/\<hash\> - Скачивание блока
+### GET /block/\<hash\> - Download block
 
-Скачивает блок данных по SHA256 хешу.
+Downloads data block by SHA256 hash.
 
 ```bash
 curl http://localhost:10001/block/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e -o output.bin
 ```
 
-**Ответ:**
+**Response:**
 ```
 HTTP/1.1 200 OK
 Content-Type: application/octet-stream
@@ -100,17 +145,15 @@ Content-Type: application/octet-stream
 <binary data>
 ```
 
-Данные передаются потоково через буферы 4KB.
+### DELETE /block/\<hash\> - Delete block
 
-### DELETE /block/\<hash\> - Удаление блока
-
-Удаляет блок данных.
+Deletes data block.
 
 ```bash
 curl -X DELETE http://localhost:10001/block/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
 ```
 
-**Ответ:**
+**Response:**
 ```
 HTTP/1.1 200 OK
 Content-Type: text/plain
@@ -118,8 +161,9 @@ Content-Type: text/plain
 Block deleted
 ```
 
-## Архитектура
+## Architecture
 
+```
   ┌─────────────────────┐
   │   Client Requests   │
   │    (port 10001)     │
@@ -128,88 +172,99 @@ Block deleted
        ┌─────┴─────┬─────┬─────┐
        │           │     │     │
   ┌────▼───┐ ┌────▼┐ ┌──▼──┐ ┌▼────┐
-  │Worker 0│ │Wkr 1│ │Wkr 2│ │Wkr 3│  ← Все слушают :10001
+  │Worker 0│ │Wkr 1│ │Wkr 2│ │Wkr 3│  ← HTTP workers (io_uring)
   └────┬───┘ └────┬┘ └──┬──┘ └┬────┘
-       └──────────┴─────┴─────┘
+       │         │     │     │
+       │    SPSC Queues (lock-free)
+       │         │     │     │
+       └─────────┴─────┴─────┘
                  │
           ┌──────▼───────┐
-          │  Controller  │ ← Единственный доступ к LMDBX
+          │  Controller  │  ← Batch processing, single
+          │   Thread     │     LMDBX accessor
+          └──────┬───────┘
+                 │
+          ┌──────▼───────┐
+          │    LMDBX     │  ← Block metadata
+          │   Database   │
           └──────────────┘
-
-### Потоковая передача данных
-
-```
-┌──────────┐     4KB chunks      ┌────────────┐     4KB chunks     ┌──────┐
-│  Client  │ ──────io_uring────► │   Server   │ ──────io_uring───► │ File │
-│  Socket  │                     │  (kernel)  │                    │      │
-└──────────┘                     └────────────┘                    └──────┘
 ```
 
-**PUT запрос:**
-1. Server читает HTTP заголовки через picozig
-2. Для PUT /block server НЕ читает body в память
-3. Вызывается `handlePutStreaming()` с socket fd и Content-Length
-4. `streamSocketToFile()` читает из socket 4KB чанками через io_uring
-5. Одновременно вычисляется SHA256 хеш на лету
-6. Каждый 4KB чанк сразу записывается в файл через io_uring
-7. Возвращается хеш клиенту
+### Components
 
-**GET запрос:**
-1. Server читает HTTP заголовки и извлекает hash из URL
-2. Вызывается `handleGetStreaming()` с socket fd и hash
-3. Отправляется HTTP заголовок ответа
-4. `streamFileToSocket()` читает файл 4KB чанками через io_uring
-5. Каждый 4KB чанк сразу отправляется в socket через io_uring
+- **HttpWorker (src/worker/)**: HTTP worker with io_uring, handles client requests
+- **BatchController (src/controller/)**: Batch controller, single thread with LMDBX access
+- **BuddyAllocator (buddy_allocator/)**: Buddy allocator for efficient block management
+- **SPSC Queues**: Lock-free queues for inter-thread communication
+- **Block Pools**: Cache of free blocks for each worker
 
-### Компоненты
+### Data flow
 
-- **server.zig**: Multi-threaded HTTP сервер на io_uring с SO_REUSEPORT
-- **file_controller.zig**: Низкоуровневая работа с файлами через io_uring и O_DIRECT
-- **block_controller_adapter.zig**: Адаптер между BuddyAllocator и FileController
-- **block_handlers.zig**: HTTP handlers для работы с блоками
-- **buddy_allocator**: Buddy allocator для эффективного управления блоками
-- **lmdbx**: LMDBX обёртка для хранения метаданных
+**PUT request:**
+1. Worker accepts HTTP request via io_uring
+2. Calculates SHA256 hash of request body
+3. Sends `occupy_block` message to controller via SPSC queue
+4. Controller reserves block in LMDBX and returns offset
+5. Worker writes data to file via io_uring at received offset
+6. Returns hash to client
 
-## Конфигурация
+**GET request:**
+1. Worker accepts HTTP request
+2. Sends `get_address` message to controller
+3. Controller returns offset and size from LMDBX
+4. Worker reads data from file via io_uring and sends to client
 
-Параметры можно изменить в `src/main.zig`:
+## Configuration
+
+Parameters can be changed in `src/main.zig`:
 
 ```zig
-const port: u16 = 10001;           // Порт сервера
-const num_workers: usize = 4;      // Количество worker-потоков
+const Config = struct {
+    port: u16 = 10001,                    // Server port
+    num_workers: u8 = 4,                  // Number of HTTP workers
+    controller_cycle_ns: i128 = 20_000,   // Controller cycle interval (20µs)
+    queue_capacity: usize = 4096,         // SPSC queue capacity
+};
 ```
 
-Параметры в `src/file_controller.zig`:
+## Performance
 
-```zig
-const PAGE_SIZE = 4096;            // Размер страницы памяти
-const BUFFER_SIZE = 4096;          // Размер буфера для streaming
-const QUEUE_DEPTH = 64;            // Глубина io_uring очереди
-```
+Tests conducted on system with Zig 0.15.1, Linux 6.16.11:
 
-## Производительность
+**In container (Alpine musl, --privileged):**
+- PUT: 3,398 ops/sec (13.27 MB/s)
+- GET: 1,774 rps (sustained load)
+- Average latency: 1.13ms
 
-- **Zero memory overhead**: Данные не загружаются полностью в RAM
-- **Direct I/O**: Использование O_DIRECT флага для bypass page cache
-- **Parallel processing**: 4 буфера работают параллельно для максимальной пропускной способности
-- **io_uring batching**: Несколько операций отправляются одновременно
+**On host (GNU glibc):**
+- PUT: 3,567 ops/sec (13.93 MB/s)
+- GET: 1,753 rps (sustained load)
+- Average latency: 1.14ms
 
-## Тестирование
+### Performance testing
 
 ```bash
-# Запуск тестов
-zig build test
+# Run Go benchmark
+cd tests
+go run rps.go -blocks 1000 -concurrency 2
 
-# Тест потоковой записи
-dd if=/dev/urandom of=test.bin bs=1M count=10
-curl -X PUT --data-binary @test.bin http://localhost:10001/block
-
-# Тест потокового чтения
-HASH=$(curl -X PUT --data-binary @test.bin http://localhost:10001/block)
-curl http://localhost:10001/block/$HASH -o download.bin
-diff test.bin download.bin
+# Parameters:
+# -blocks N       - number of unique blocks for test
+# -concurrency N  - number of concurrent workers
+# -duration 10s   - sustained load test duration
 ```
 
-## Лицензия
+## Testing
 
-MIT
+```bash
+# Run unit tests
+zig build test
+
+# Integration test
+cd tests
+python3 test_basic_operations.py
+```
+
+## License
+
+Apache 2.0

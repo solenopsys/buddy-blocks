@@ -114,6 +114,10 @@ pub const HttpWorker = struct {
     pending_requests: std.AutoHashMap(u64, PendingRequest),
     next_request_id: u64,
 
+    // Для динамической паузы
+    before_run: i128,
+    cycle_interval_ns: i128,
+
     // Флаг работы
     running: std.atomic.Value(bool),
 
@@ -125,6 +129,7 @@ pub const HttpWorker = struct {
         block_pools: [8]IBlockPool,
         to_controller: IMessageQueue,
         from_controller: IMessageQueue,
+        cycle_interval_ns: i128,
     ) !HttpWorker {
         const server_socket = try createServerSocket(port);
         errdefer posix.close(server_socket);
@@ -150,6 +155,8 @@ pub const HttpWorker = struct {
             .from_controller = from_controller,
             .pending_requests = std.AutoHashMap(u64, PendingRequest).init(allocator),
             .next_request_id = 1,
+            .before_run = std.time.nanoTimestamp(),
+            .cycle_interval_ns = cycle_interval_ns,
             .running = std.atomic.Value(bool).init(true),
         };
     }
@@ -191,6 +198,18 @@ pub const HttpWorker = struct {
         _ = try self.ring.accept(accept_user_data, self.server_socket, null, null, 0);
 
         while (self.running.load(.monotonic)) {
+            // Вычисляем сколько прошло с прошлого цикла
+            const now = std.time.nanoTimestamp();
+            const elapsed = now - self.before_run;
+
+            // Если прошло меньше интервала - спим на остаток
+            if (elapsed < self.cycle_interval_ns) {
+                const sleep_ns = self.cycle_interval_ns - elapsed;
+                std.Thread.sleep(@intCast(sleep_ns));
+            }
+            // Обновляем время начала цикла НА now
+            self.before_run = now;
+
             // Non-blocking submit (submit=0 означает не ждать)
             _ = try self.ring.submit();
 
@@ -235,9 +254,6 @@ pub const HttpWorker = struct {
 
             // Проверяем и пополняем пулы блоков
             try self.refillPools();
-
-            // Небольшая пауза чтобы не жечь CPU
-            std.Thread.sleep(100); // 100ns
         }
     }
 

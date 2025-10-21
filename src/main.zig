@@ -33,8 +33,8 @@ const Config = struct {
         2,  // 512KB
     },
 
-    /// Controller cycle interval in nanoseconds (100µs)
-    controller_cycle_ns: i128 = 100_000,
+    /// Controller cycle interval in nanoseconds (20µs)
+    controller_cycle_ns: i128 = 20_000,
 
     /// SPSC queue capacity
     queue_capacity: usize = 4096,
@@ -232,6 +232,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
             pools_interfaces[i],
             worker_queues[i].from_worker, // worker writes here
             worker_queues[i].to_worker,   // worker reads from here
+            config.controller_cycle_ns,   // timing interval
         );
 
         std.debug.print("  Worker {d} on port {d} (SO_REUSEPORT)\n", .{ worker_id, config.port });

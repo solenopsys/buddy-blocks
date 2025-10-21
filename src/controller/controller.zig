@@ -75,14 +75,17 @@ pub const BatchController = struct {
 
     pub fn run(self: *BatchController) !void {
         while (self.running.load(.monotonic)) {
-            // Шаг 0: Динамическая пауза
+            // Вычисляем сколько прошло с прошлого цикла
             const now = std.time.nanoTimestamp();
             const elapsed = now - self.before_run;
+
+            // Если прошло меньше интервала - спим на остаток
             if (elapsed < self.cycle_interval_ns) {
                 const sleep_ns = self.cycle_interval_ns - elapsed;
                 std.Thread.sleep(@intCast(sleep_ns));
             }
-            self.before_run = std.time.nanoTimestamp();
+            // Обновляем время начала цикла НА now (не на новый timestamp!)
+            self.before_run = now;
 
             // Шаг 1: Собрать все сообщения из входящих очередей
             try self.collectMessages();
