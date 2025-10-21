@@ -412,9 +412,11 @@ pub const HttpWorker = struct {
                 return;
             } else {
                 // Root handler
-                const response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 32\r\n\r\nFastBlock Storage Worker";
-                const write_user_data = (OP_WRITE << 32) | client_id;
-                _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+                const response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 24\r\n\r\nFastBlock Storage Worker";
+                _ = try posix.write(client.*.socket, response);
+                client.*.reset();
+                const read_user_data = (OP_READ << 32) | client_id;
+                _ = try self.ring.read(read_user_data, client.*.socket, .{ .buffer = client.*.buffer }, 0);
                 return;
             }
         } else {
@@ -459,16 +461,16 @@ pub const HttpWorker = struct {
 
         if (body.len == 0) {
             const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 10\r\n\r\nEmpty body";
-            const write_user_data = (OP_WRITE << 32) | client_id;
-            _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+            _ = try posix.write(client.*.socket, response);
+            self.closeClient(client_id);
             return;
         }
 
         // Check size limit (512KB)
         if (body.len > 524288) {
             const response = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 28\r\n\r\nPayload too large (max 512KB)";
-            const write_user_data = (OP_WRITE << 32) | client_id;
-            _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+            _ = try posix.write(client.*.socket, response);
+            self.closeClient(client_id);
             return;
         }
 
@@ -743,8 +745,8 @@ pub const HttpWorker = struct {
             .internal_error => "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 14\r\n\r\nInternal error",
         };
 
-        const write_user_data = (OP_WRITE << 32) | client_id;
-        _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+        _ = try posix.write(client.*.socket, response);
+        self.closeClient(client_id);
     }
 
     fn sendPutSuccessResponse(self: *HttpWorker, client_id: u64, hash: [32]u8) !void {
@@ -761,16 +763,30 @@ pub const HttpWorker = struct {
         );
         defer self.allocator.free(response);
 
-        const write_user_data = (OP_WRITE << 32) | client_id;
-        _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+        _ = try posix.write(client.*.socket, response);
+
+        if (!client.*.keep_alive) {
+            self.closeClient(client_id);
+        } else {
+            client.*.reset();
+            const read_user_data = (OP_READ << 32) | client_id;
+            _ = try self.ring.read(read_user_data, client.*.socket, .{ .buffer = client.*.buffer }, 0);
+        }
     }
 
     fn sendDeleteSuccessResponse(self: *HttpWorker, client_id: u64) !void {
         const client = self.clients.getPtr(client_id) orelse return;
 
         const response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nBlock deleted";
-        const write_user_data = (OP_WRITE << 32) | client_id;
-        _ = try self.ring.write(write_user_data, client.*.socket, response, 0);
+        _ = try posix.write(client.*.socket, response);
+
+        if (!client.*.keep_alive) {
+            self.closeClient(client_id);
+        } else {
+            client.*.reset();
+            const read_user_data = (OP_READ << 32) | client_id;
+            _ = try self.ring.read(read_user_data, client.*.socket, .{ .buffer = client.*.buffer }, 0);
+        }
     }
 };
 

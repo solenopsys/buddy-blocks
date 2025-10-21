@@ -45,8 +45,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Линкуем с liblmdbx.so
-    exe.addLibraryPath(b.path("../zig-lmdbx/zig-out/lib"));
-    exe.linkSystemLibrary("lmdbx");
+    exe.addObjectFile(b.path("../zig-lmdbx/zig-out/lib/liblmdbx-x86_64-gnu.so"));
     exe.addIncludePath(b.path("../zig-lmdbx/libs/libmdbx"));
     exe.linkLibC();
 

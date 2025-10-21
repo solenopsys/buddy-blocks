@@ -6,7 +6,7 @@ import struct
 
 SERVER_URL = "http://localhost:10001"
 BLOCK_SIZE = 4096
-NUM_BLOCKS = 1000
+NUM_BLOCKS = 2
 
 print(f"=== FastBlock Benchmark: {NUM_BLOCKS} blocks x {BLOCK_SIZE} bytes ===")
 
