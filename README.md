@@ -103,6 +103,66 @@ With just one thread touching LMDBX there is no contention, while batching keeps
 - Target free counts per worker keep hot pools replenished without synchronisation.
 - LMDBX stores hashes, offsets, and sizes (~110 bytes per record at 10M entries).
 
+## LMDB Storage Structure
+
+Buddy allocator uses LMDBX with three logical tables (all in one database):
+
+### 1. Free List (available blocks)
+
+**Key format:** `free_{size}_{block_num}`
+- Example: `free_4k_123`, `free_8k_456`
+- Size: `4k`, `8k`, `16k`, `32k`, `64k`, `128k`, `256k`, `512k`
+- block_num: unique within size class
+
+**Value:** 8 bytes
+- buddy_num (u64, little-endian)
+
+**Purpose:** Tracks available blocks ready for allocation
+
+### 2. Temp List (allocated but not yet occupied)
+
+**Key format:** `t_{size}_{block_num}`
+- Example: `t_4k_123`, `t_8k_456`
+- Block has been removed from free list and assigned to a worker
+- Not yet written with data or bound to content hash
+
+**Value:** 8 bytes
+- buddy_num (u64, little-endian)
+
+**Purpose:** Crash-safe intermediate state
+- If process crashes: recovery scans `t_*` prefix and moves blocks back to free list
+- Prevents double-allocation: same block can't be given to multiple workers
+- Prevents block loss: block is always in exactly one of three states
+
+### 3. Hash Table (occupied blocks)
+
+**Key format:** 32 bytes (SHA-256 hash)
+- Raw binary hash of block content
+
+**Value:** BlockMetadata (encoded)
+- block_size: enum (1 byte)
+- block_num: u64 (8 bytes)
+- buddy_num: u64 (8 bytes)
+- data_size: u64 (8 bytes) - actual content size
+
+**Purpose:** Maps content hash to physical block location
+
+### State Transitions
+
+```
+[free_4k_123] --allocate--> [t_4k_123] --occupy--> [hash → metadata]
+                                ↑                         |
+                                |                         |
+                                +--------free-------------+
+```
+
+**Crash Recovery:**
+- Scan all keys with prefix `t_`
+- For each `t_{size}_{block_num}`, read buddy_num
+- Write `free_{size}_{block_num}` = buddy_num
+- Delete `t_{size}_{block_num}`
+- Result: all temp blocks returned to free list
+
 ## Building
 
 Requires Zig 0.15.1+, Linux 5.1+ with `io_uring`, and LMDBX (fetched via `zig-lmdbx` dependency).

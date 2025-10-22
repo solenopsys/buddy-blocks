@@ -140,7 +140,6 @@ test "SimpleBlockPool - basic acquire/release" {
 
     // Добавляем блок
     const block1 = BlockInfo{
-        .offset = 4096,
         .size = 0,
         .block_num = 1,
     };
@@ -148,7 +147,7 @@ test "SimpleBlockPool - basic acquire/release" {
 
     // Берем блок
     const acquired = iface.acquire().?;
-    try testing.expectEqual(@as(u64, 4096), acquired.offset);
+    try testing.expectEqual(@as(u64, 4096), acquired.getOffset());
     try testing.expectEqual(@as(u8, 0), acquired.size);
     try testing.expectEqual(@as(u64, 1), acquired.block_num);
 
@@ -166,12 +165,12 @@ test "SimpleBlockPool - needsRefill logic" {
     try testing.expect(iface.needsRefill());
 
     // Добавляем 1 блок
-    try pool.addBlock(.{ .offset = 0, .size = 0, .block_num = 1 });
+    try pool.addBlock(.{ .size = 0, .block_num = 1 });
     try testing.expect(iface.needsRefill()); // still < 3
 
     // Добавляем еще 2 блока
-    try pool.addBlock(.{ .offset = 4096, .size = 0, .block_num = 2 });
-    try pool.addBlock(.{ .offset = 8192, .size = 0, .block_num = 3 });
+    try pool.addBlock(.{ .size = 0, .block_num = 2 });
+    try pool.addBlock(.{ .size = 0, .block_num = 3 });
     try testing.expect(!iface.needsRefill()); // now == 3, no refill needed
 
     // Берем один блок
@@ -186,7 +185,6 @@ test "SimpleBlockPool - release returns block to pool" {
     const iface = pool.interface();
 
     const block = BlockInfo{
-        .offset = 1234,
         .size = 0,
         .block_num = 99,
     };
@@ -196,7 +194,7 @@ test "SimpleBlockPool - release returns block to pool" {
 
     // Можем забрать его обратно
     const acquired = iface.acquire().?;
-    try testing.expectEqual(@as(u64, 1234), acquired.offset);
+    try testing.expectEqual(@as(u64, 405504), acquired.getOffset()); // 99 * 4096
     try testing.expectEqual(@as(u64, 99), acquired.block_num);
 }
 
@@ -214,14 +212,14 @@ test "MockBlockPool - configurable behavior" {
     try testing.expect(!iface.needsRefill());
 
     // Настраиваем блоки для возврата
-    try pool.addBlock(.{ .offset = 100, .size = 2, .block_num = 10 });
-    try pool.addBlock(.{ .offset = 200, .size = 2, .block_num = 20 });
+    try pool.addBlock(.{ .size = 2, .block_num = 10 });
+    try pool.addBlock(.{ .size = 2, .block_num = 20 });
 
     const b1 = iface.acquire().?;
-    try testing.expectEqual(@as(u64, 200), b1.offset); // LIFO порядок (stack)
+    try testing.expectEqual(@as(u64, 327680), b1.getOffset()); // LIFO порядок (stack) - 20 * 16384
 
     const b2 = iface.acquire().?;
-    try testing.expectEqual(@as(u64, 100), b2.offset);
+    try testing.expectEqual(@as(u64, 163840), b2.getOffset()); // 10 * 16384
 
     try testing.expect(iface.acquire() == null);
 }
@@ -240,11 +238,11 @@ test "Interface compatibility - Simple and Mock work the same" {
         var pool = try SimpleBlockPool.init(testing.allocator, 0, 5);
         defer pool.deinit();
 
-        try pool.addBlock(.{ .offset = 999, .size = 0, .block_num = 1 });
+        try pool.addBlock(.{ .size = 0, .block_num = 1 });
 
         const iface = pool.interface();
         const block = iface.acquire().?;
-        try testing.expectEqual(@as(u64, 999), block.offset);
+        try testing.expectEqual(@as(u64, 4096), block.getOffset()); // 1 * 4096
     }
 
     // Тот же тест с MockBlockPool
@@ -252,10 +250,10 @@ test "Interface compatibility - Simple and Mock work the same" {
         var pool = MockBlockPool.init(testing.allocator, 0);
         defer pool.deinit();
 
-        try pool.addBlock(.{ .offset = 999, .size = 0, .block_num = 1 });
+        try pool.addBlock(.{ .size = 0, .block_num = 1 });
 
         const iface = pool.interface();
         const block = iface.acquire().?;
-        try testing.expectEqual(@as(u64, 999), block.offset);
+        try testing.expectEqual(@as(u64, 4096), block.getOffset()); // 1 * 4096
     }
 }

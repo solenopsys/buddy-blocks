@@ -28,7 +28,9 @@ pub const OccupyRequest = struct {
     worker_id: u8,
     request_id: u64,
     hash: [32]u8,
-    data_size: u64,
+    block_num: u64, // Номер блока из пула
+    size: u8, // Индекс размера блока (0-7)
+    data_size: u64, // Реальный размер записанных данных (может быть < размера блока)
 };
 
 pub const ReleaseRequest = struct {
@@ -48,7 +50,6 @@ pub const GetAddressRequest = struct {
 pub const AllocateResult = struct {
     worker_id: u8,
     request_id: u64,
-    offset: u64,
     size: u8,
     block_num: u64,
 };

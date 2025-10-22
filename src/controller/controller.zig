@@ -326,7 +326,7 @@ test "BatchController - collectMessages разложение по типам" {
 
     // Отправляем разные типы сообщений
     _ = queue1.interface().push(.{ .allocate_block = .{ .worker_id = 0, .request_id = 1, .size = 2 } });
-    _ = queue1.interface().push(.{ .occupy_block = .{ .worker_id = 0, .request_id = 2, .hash = [_]u8{0xAA} ** 32, .data_size = 1024 } });
+    _ = queue1.interface().push(.{ .occupy_block = .{ .worker_id = 0, .request_id = 2, .hash = [_]u8{0xAA} ** 32, .block_num = 100 } });
     _ = queue1.interface().push(.{ .release_block = .{ .worker_id = 0, .request_id = 3, .hash = [_]u8{0xBB} ** 32 } });
     _ = queue1.interface().push(.{ .get_address = .{ .worker_id = 0, .request_id = 4, .hash = [_]u8{0xCC} ** 32 } });
 
@@ -353,7 +353,6 @@ test "BatchController - processBatches порядок обработки" {
     mock_handler.allocate_response = .{
         .worker_id = 0,
         .request_id = 1,
-        .offset = 4096,
         .size = 2,
         .block_num = 100,
     };
@@ -386,7 +385,7 @@ test "BatchController - processBatches порядок обработки" {
 
     // Добавляем запросы напрямую в батч-буферы
     try controller.allocate_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 1, .size = 2 });
-    try controller.occupy_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 2, .hash = [_]u8{0xAA} ** 32, .data_size = 1024 });
+    try controller.occupy_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 2, .hash = [_]u8{0xAA} ** 32, .block_num = 100 });
     try controller.release_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 3, .hash = [_]u8{0xBB} ** 32 });
     try controller.get_address_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 4, .hash = [_]u8{0xCC} ** 32 });
 
@@ -406,7 +405,6 @@ test "BatchController - processBatches порядок обработки" {
     try testing.expectEqual(@as(usize, 1), controller.get_address_results.items.len);
 
     // Проверяем содержимое результатов
-    try testing.expectEqual(@as(u64, 4096), controller.allocate_results.items[0].offset);
     try testing.expectEqual(@as(u64, 8192), controller.get_address_results.items[0].offset);
 }
 
@@ -436,7 +434,6 @@ test "BatchController - sendResults отправка в правильные о�
     try controller.allocate_results.append(controller.allocator, .{
         .worker_id = 0,
         .request_id = 1,
-        .offset = 4096,
         .size = 2,
         .block_num = 100,
     });
@@ -471,7 +468,6 @@ test "BatchController - полный цикл обработки" {
     mock_handler.allocate_response = .{
         .worker_id = 0,
         .request_id = 1,
-        .offset = 4096,
         .size = 2,
         .block_num = 100,
     };
@@ -509,7 +505,7 @@ test "BatchController - полный цикл обработки" {
     var msg: messages.Message = undefined;
     try testing.expect(queue2.interface().pop(&msg));
     try testing.expectEqual(std.meta.Tag(messages.Message).allocate_result, std.meta.activeTag(msg));
-    try testing.expectEqual(@as(u64, 4096), msg.allocate_result.offset);
+    try testing.expectEqual(@as(u64, 1), msg.allocate_result.request_id);
 }
 
 test "BatchController - обработка ошибок" {

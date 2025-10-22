@@ -145,6 +145,36 @@ pub const BuddyAllocator = struct {
         return BlockMetadata.decode(data);
     }
 
+    /// Update hash for an existing block (replace old hash with new hash)
+    /// Used when converting from temporary hash to real content hash
+    pub fn updateHash(self: *BuddyAllocator, old_hash: [32]u8, new_hash: [32]u8) !BlockMetadata {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        try self.db.beginTransaction();
+        errdefer self.db.abortTransaction();
+
+        // Get metadata by old hash
+        const data = try self.db.get(self.allocator, &old_hash) orelse {
+            self.db.abortTransaction();
+            return BuddyAllocatorError.BlockNotFound;
+        };
+        defer self.allocator.free(data);
+
+        const metadata = try BlockMetadata.decode(data);
+
+        // Delete old hash entry
+        try self.db.delete(&old_hash);
+
+        // Save metadata with new hash
+        const encoded = metadata.encode();
+        try self.db.put(&new_hash, &encoded);
+
+        try self.db.commitTransaction();
+
+        return metadata;
+    }
+
     /// Free block by hash
     pub fn free(self: *BuddyAllocator, hash: [32]u8) !void {
         self.mutex.lock();
@@ -179,6 +209,101 @@ pub const BuddyAllocator = struct {
             return true;
         }
         return false;
+    }
+
+    /// Move block from free-list to temp (crash-safe allocation)
+    pub fn allocateToTemp(self: *BuddyAllocator, block_size: BlockSize) !BlockMetadata {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        try self.db.beginTransaction();
+        errdefer self.db.abortTransaction();
+
+        // Use existing allocation logic (handles split, extend, etc.)
+        const metadata = try self.allocateBlockInternal(block_size);
+
+        // Delete from free-list (allocateBlockInternal already removed it)
+        // Now add to temp: t_{size}_{block_num} = buddy_num
+        var temp_key_buf: [64]u8 = undefined;
+        const temp_key = try std.fmt.bufPrint(&temp_key_buf, "t_{s}_{d}", .{ metadata.block_size.toString(), metadata.block_num });
+
+        var value_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &value_buf, metadata.buddy_num, .little);
+        try self.db.put(temp_key, &value_buf);
+
+        try self.db.commitTransaction();
+
+        return metadata;
+    }
+
+    /// Move block from temp to hash-table (occupy with real data)
+    pub fn occupyFromTemp(self: *BuddyAllocator, hash: [32]u8, metadata: BlockMetadata) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        try self.db.beginTransaction();
+        errdefer self.db.abortTransaction();
+
+        // Delete from temp: t_{size}_{block_num}
+        var temp_key_buf: [64]u8 = undefined;
+        const temp_key = try std.fmt.bufPrint(&temp_key_buf, "t_{s}_{d}", .{ metadata.block_size.toString(), metadata.block_num });
+        try self.db.delete(temp_key);
+
+        // Add to hash-table
+        const encoded = metadata.encode();
+        try self.db.put(&hash, &encoded);
+
+        try self.db.commitTransaction();
+    }
+
+    /// Recover temp blocks back to free-list (called on startup)
+    pub fn recoverTempBlocks(self: *BuddyAllocator) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        try self.db.beginTransaction();
+        errdefer self.db.abortTransaction();
+
+        const cursor = try self.db.openCursor();
+        defer lmdbx.Database.closeCursor(cursor);
+
+        // Scan all keys with prefix "t_"
+        var recovered: usize = 0;
+        while (try cursor.seekPrefix(self.allocator, "t_")) |entry| {
+            defer self.allocator.free(entry.key);
+            defer self.allocator.free(entry.value);
+
+            // Parse key: t_{size}_{block_num}
+            if (entry.value.len != 8) continue;
+
+            // Extract size and block_num from key
+            // Key format: "t_4k_123"
+            const key_str = entry.key;
+            if (key_str.len < 4) continue; // Must be at least "t_4k_0"
+
+            const size_start = 2; // After "t_"
+            const size_end = std.mem.indexOfPos(u8, key_str, size_start, "_") orelse continue;
+            const size_str = key_str[size_start..size_end];
+
+            const block_num_str = key_str[size_end + 1..];
+            const block_num = std.fmt.parseInt(u64, block_num_str, 10) catch continue;
+
+            // Move to free-list: free_{size}_{block_num} = value (buddy_num)
+            var free_key_buf: [64]u8 = undefined;
+            const free_key = try std.fmt.bufPrint(&free_key_buf, "free_{s}_{d}", .{ size_str, block_num });
+            try self.db.put(free_key, entry.value);
+
+            // Delete temp entry
+            try self.db.delete(entry.key);
+
+            recovered += 1;
+        }
+
+        try self.db.commitTransaction();
+
+        if (recovered > 0) {
+            std.debug.print("BuddyAllocator: Recovered {d} temp blocks to free-list\n", .{recovered});
+        }
     }
 
     /// Allocate block of given size (internal, assumes mutex is locked)

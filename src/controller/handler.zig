@@ -5,6 +5,7 @@ const IControllerHandler = interfaces.IControllerHandler;
 const BuddyAllocator = @import("../infrastructure/buddy_allocator.zig").BuddyAllocator;
 const types = @import("../infrastructure/types.zig");
 const BlockSize = types.BlockSize;
+const BlockMetadata = types.BlockMetadata;
 
 /// Реальный обработчик сообщений для Controller'а (работает с BuddyAllocator)
 pub const BuddyControllerHandler = struct {
@@ -31,25 +32,14 @@ pub const BuddyControllerHandler = struct {
     fn handleAllocateImpl(ptr: *anyopaque, msg: messages.AllocateRequest) !messages.AllocateResult {
         const self: *BuddyControllerHandler = @ptrCast(@alignCast(ptr));
 
-        // Создаем временный "резервный" хеш из worker_id и request_id
-        // Это позволит нам выделить блок и записать временный хеш в LMDBX
-        // Позже в handleOccupy мы заменим его на реальный хеш
-        var temp_hash: [32]u8 = [_]u8{0} ** 32;
-        temp_hash[0] = 0xFF; // Маркер резервного хеша
-        temp_hash[1] = msg.worker_id;
-        std.mem.writeInt(u64, temp_hash[2..10], msg.request_id, .little);
-
-        // Конвертируем data_size в bytes для allocate
         const block_size = try indexToBlockSize(msg.size);
-        const data_size = @intFromEnum(block_size);
 
-        // Выделяем блок с резервным хешом
-        const metadata = try self.buddy_allocator.allocate(temp_hash, data_size);
+        // Переместить блок из free-list в temp (crash-safe)
+        const metadata = try self.buddy_allocator.allocateToTemp(block_size);
 
         return .{
             .worker_id = msg.worker_id,
             .request_id = msg.request_id,
-            .offset = BuddyAllocator.getOffset(metadata),
             .size = msg.size,
             .block_num = metadata.block_num,
         };
@@ -58,14 +48,24 @@ pub const BuddyControllerHandler = struct {
     fn handleOccupyImpl(ptr: *anyopaque, msg: messages.OccupyRequest) !messages.OccupyResult {
         const self: *BuddyControllerHandler = @ptrCast(@alignCast(ptr));
 
-        // Выделяем блок с реальным хешом
-        const metadata = try self.buddy_allocator.allocate(msg.hash, msg.data_size);
+        // Worker уже записал данные в блок - переместить из temp в hash-table
+        const block_size = try indexToBlockSize(msg.size);
+
+        const metadata = BlockMetadata{
+            .block_size = block_size,
+            .block_num = msg.block_num,
+            .buddy_num = if (msg.block_num % 2 == 0) msg.block_num + 1 else msg.block_num - 1,
+            .data_size = msg.data_size,
+        };
+
+        // Атомарно: удалить из temp + добавить в hash-table
+        try self.buddy_allocator.occupyFromTemp(msg.hash, metadata);
 
         return .{
             .worker_id = msg.worker_id,
             .request_id = msg.request_id,
             .offset = BuddyAllocator.getOffset(metadata),
-            .size = metadata.data_size,
+            .size = msg.data_size,
         };
     }
 
@@ -146,7 +146,7 @@ pub const MockControllerHandler = struct {
             .worker_id = msg.worker_id,
             .request_id = msg.request_id,
             .offset = 0,
-            .size = msg.data_size,
+            .size = 4096, // Mock: return fixed size
         };
     }
 
@@ -173,7 +173,6 @@ test "MockControllerHandler - allocate" {
     handler.allocate_response = .{
         .worker_id = 1,
         .request_id = 100,
-        .offset = 4096,
         .size = 0,
         .block_num = 1,
     };
@@ -190,7 +189,6 @@ test "MockControllerHandler - allocate" {
 
     try testing.expectEqual(@as(u8, 1), result.worker_id);
     try testing.expectEqual(@as(u64, 100), result.request_id);
-    try testing.expectEqual(@as(u64, 4096), result.offset);
     try testing.expectEqual(@as(u8, 0), result.size);
     try testing.expectEqual(@as(u64, 1), result.block_num);
 
@@ -207,7 +205,7 @@ test "MockControllerHandler - occupy" {
         .worker_id = 1,
         .request_id = 200,
         .hash = [_]u8{0xAA} ** 32,
-        .data_size = 1024,
+        .block_num = 100,
     };
 
     _ = try iface.handleOccupy(request);
@@ -215,7 +213,7 @@ test "MockControllerHandler - occupy" {
     // Проверяем что запрос был записан
     try testing.expect(handler.last_occupy != null);
     try testing.expectEqual(@as(u64, 200), handler.last_occupy.?.request_id);
-    try testing.expectEqual(@as(u64, 1024), handler.last_occupy.?.data_size);
+    try testing.expectEqual(@as(u64, 100), handler.last_occupy.?.block_num);
 }
 
 test "MockControllerHandler - release" {
@@ -269,7 +267,6 @@ test "Interface compatibility - both implementations work through same interface
         mock.allocate_response = .{
             .worker_id = 1,
             .request_id = 1,
-            .offset = 0,
             .size = 0,
             .block_num = 1,
         };

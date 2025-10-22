@@ -67,6 +67,8 @@ const PutWrite = struct {
     hash: [32]u8,
     data: []u8,  // Owned copy of data
     offset: u64,
+    block_num: u64,
+    size_index: u8,
     allocator: Allocator,
 
     fn deinit(self: *PutWrite) void {
@@ -198,17 +200,10 @@ pub const HttpWorker = struct {
         _ = try self.ring.accept(accept_user_data, self.server_socket, null, null, 0);
 
         while (self.running.load(.monotonic)) {
-            // Non-blocking submit всех pending операций
+            // Submit без ожидания - чтобы цикл крутился и читал ответы от controller
             _ = try self.ring.submit();
 
             // Обрабатываем все готовые CQE
-            const ready = self.ring.cq_ready();
-            if (ready == 0) {
-                // Если нет готовых событий - короткая пауза чтобы не крутить CPU
-                std.Thread.sleep(10_000); // 10µs
-                continue;
-            }
-
             while (self.ring.cq_ready() > 0) {
                 const cqe = try self.ring.copy_cqe();
 
@@ -249,6 +244,9 @@ pub const HttpWorker = struct {
 
             // Проверяем и пополняем пулы блоков
             try self.refillPools();
+
+            // Пауза 5ms - баланс между latency и CPU usage
+            std.Thread.sleep(5_000_000); // 5 миллисекунд
         }
     }
 
@@ -285,7 +283,6 @@ pub const HttpWorker = struct {
                 .allocate_result => |result| {
                     // Добавляем блок в соответствующий пул
                     const block_info = BlockInfo{
-                        .offset = result.offset,
                         .size = result.size,
                         .block_num = result.block_num,
                     };
@@ -303,44 +300,10 @@ pub const HttpWorker = struct {
                     }
                 },
                 .occupy_result => |result| {
-                    // Получили offset - запускаем async write через io_uring
+                    // Контроллер подтвердил сохранение хеша в LMDB - отправляем ответ клиенту
                     if (self.pending_requests.get(result.request_id)) |pending| {
                         if (pending.request_type == .occupy) {
-                            const client = self.clients.getPtr(pending.client_id) orelse {
-                                _ = self.pending_requests.remove(result.request_id);
-                                return;
-                            };
-
-                            // Extract body from client data
-                            const request = client.*.data.items;
-                            const body_start = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
-                                _ = self.pending_requests.remove(result.request_id);
-                                return;
-                            };
-                            const body = request[body_start + 4 ..];
-
-                            // Create PutWrite with owned copy of data
-                            const put_write_id = self.next_put_write_id;
-                            self.next_put_write_id += 1;
-
-                            const put_write = try self.allocator.create(PutWrite);
-                            const data_copy = try self.allocator.alloc(u8, body.len);
-                            @memcpy(data_copy, body);
-
-                            put_write.* = .{
-                                .client_id = pending.client_id,
-                                .hash = pending.hash,
-                                .data = data_copy,
-                                .offset = result.offset,
-                                .allocator = self.allocator,
-                            };
-
-                            try self.put_writes.put(put_write_id, put_write);
-
-                            // Submit async write через io_uring
-                            const write_user_data = (OP_PUT_WRITE << 32) | put_write_id;
-                            _ = try self.ring.write(write_user_data, self.file_fd, data_copy, result.offset);
-
+                            try self.sendPutSuccessResponse(pending.client_id, pending.hash);
                             _ = self.pending_requests.remove(result.request_id);
                         }
                     }
@@ -485,34 +448,45 @@ pub const HttpWorker = struct {
             return;
         }
 
+        // Определяем размер блока: log2(size) - 12 для индекса (4KB=0, 8KB=1, ...)
+        const size_bits = std.math.log2_int_ceil(u64, @max(body.len, 4096));
+        const size_index: u8 = @intCast(size_bits - 12);
+
+        // Берем блок из пула
+        const block_info = self.block_pools[size_index].acquire() orelse {
+            try self.sendErrorResponse(client_id, .allocation_failed);
+            return;
+        };
+
         // Compute SHA256 hash
         var hash: [32]u8 = undefined;
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(body);
         hasher.final(&hash);
 
-        // Send occupy request to Controller
-        const request_id = self.next_request_id;
-        self.next_request_id += 1;
+        // Записываем данные в файл асинхронно
+        const put_write_id = self.next_put_write_id;
+        self.next_put_write_id += 1;
 
-        const msg = messages.Message{
-            .occupy_block = .{
-                .worker_id = self.id,
-                .request_id = request_id,
-                .hash = hash,
-                .data_size = body.len,
-            },
+        const put_write = try self.allocator.create(PutWrite);
+        const data_copy = try self.allocator.alloc(u8, body.len);
+        @memcpy(data_copy, body);
+
+        put_write.* = .{
+            .client_id = client_id,
+            .hash = hash,
+            .data = data_copy,
+            .offset = block_info.getOffset(),
+            .block_num = block_info.block_num,
+            .size_index = size_index,
+            .allocator = self.allocator,
         };
 
-        _ = self.to_controller.push(msg);
+        try self.put_writes.put(put_write_id, put_write);
 
-        // Save pending request with hash and body pointer
-        try self.pending_requests.put(request_id, .{
-            .request_id = request_id,
-            .client_id = client_id,
-            .request_type = .occupy,
-            .hash = hash,
-        });
+        // Submit async write через io_uring
+        const write_user_data = (OP_PUT_WRITE << 32) | put_write_id;
+        _ = try self.ring.write(write_user_data, self.file_fd, data_copy, block_info.getOffset());
     }
 
     fn handleGetRequest(self: *HttpWorker, client_id: u64) !void {
@@ -725,8 +699,31 @@ pub const HttpWorker = struct {
             return;
         }
 
-        // Write successful - send hash to client
-        try self.sendPutSuccessResponse(put_write.client_id, put_write.hash);
+        // Write successful - теперь отправляем occupy запрос контроллеру
+        const request_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        const msg = messages.Message{
+            .occupy_block = .{
+                .worker_id = self.id,
+                .request_id = request_id,
+                .hash = put_write.hash,
+                .block_num = put_write.block_num,
+                .size = put_write.size_index,
+                .data_size = put_write.data.len,
+            },
+        };
+
+        _ = self.to_controller.push(msg);
+
+        // Save pending request - когда контроллер ответит, отправим ответ клиенту
+        try self.pending_requests.put(request_id, .{
+            .request_id = request_id,
+            .client_id = put_write.client_id,
+            .request_type = .occupy,
+            .hash = put_write.hash,
+        });
+
         self.cleanupPutWrite(put_write_id);
     }
 
@@ -972,7 +969,6 @@ test "HttpWorker - checkControllerMessages обрабатывает allocate_res
         .allocate_result = .{
             .worker_id = 0,
             .request_id = 1,
-            .offset = 4096,
             .size = 2,
             .block_num = 100,
         },
@@ -985,7 +981,7 @@ test "HttpWorker - checkControllerMessages обрабатывает allocate_res
     // Проверяем что блок добавлен в пул размера 2
     const block_from_pool = pools[2].acquire();
     try testing.expect(block_from_pool != null);
-    try testing.expectEqual(@as(u64, 4096), block_from_pool.?.offset);
+    try testing.expectEqual(@as(u64, 1638400), block_from_pool.?.getOffset()); // 100 * 16384
     try testing.expectEqual(@as(u64, 100), block_from_pool.?.block_num);
 }
 

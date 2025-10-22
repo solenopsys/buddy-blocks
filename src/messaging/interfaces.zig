@@ -56,9 +56,29 @@ pub const IControllerHandler = struct {
 
 /// Информация о блоке для пула Worker'а
 pub const BlockInfo = struct {
-    offset: u64,
-    size: u8,
+    size: u8, // Индекс размера блока (0=4k, 1=8k, ..., 7=512k)
     block_num: u64,
+
+    /// Вычисляет offset в файле данных
+    pub fn getOffset(self: BlockInfo) u64 {
+        const size_bytes = sizeToBytes(self.size);
+        return self.block_num * size_bytes;
+    }
+
+    /// Конвертирует индекс размера в байты
+    fn sizeToBytes(size_index: u8) u64 {
+        return switch (size_index) {
+            0 => 4096,      // 4KB
+            1 => 8192,      // 8KB
+            2 => 16384,     // 16KB
+            3 => 32768,     // 32KB
+            4 => 65536,     // 64KB
+            5 => 131072,    // 128KB
+            6 => 262144,    // 256KB
+            7 => 524288,    // 512KB
+            else => 4096,   // default to 4KB
+        };
+    }
 };
 
 /// Интерфейс для пула блоков Worker'а

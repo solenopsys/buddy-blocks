@@ -199,7 +199,7 @@ test "MockMessageQueue - basic push/pop" {
             .worker_id = 5,
             .request_id = 500,
             .hash = [_]u8{0xAB} ** 32,
-            .data_size = 4096,
+            .block_num = 1,
         },
     };
 

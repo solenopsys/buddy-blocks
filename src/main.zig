@@ -162,6 +162,10 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
         file_controller.interface(),
     );
 
+    // Recover temp blocks (crash recovery)
+    std.debug.print("Recovering temp blocks...\n", .{});
+    try buddy_allocator.recoverTempBlocks();
+
     // Initialize controller handler
     const ctrl_handler = try allocator.create(controller_handler.BuddyControllerHandler);
     ctrl_handler.* = controller_handler.BuddyControllerHandler.init(buddy_allocator);
