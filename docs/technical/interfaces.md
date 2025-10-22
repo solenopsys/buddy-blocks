@@ -1097,6 +1097,69 @@ test "Worker requests refill when pool is low" {
     try testing.expect(msg == .allocate_block);
 }
 ```
+### Типы сообщений
+
+#### От Worker → Controller
+```zig
+const MessageToController = union(enum) {
+    allocate_block: struct {
+        worker_id: u8,   // обратный адрес (1 байт)
+        request_id: u64, // для сопоставления запроса и ответа в worker
+        size: u8,        // размер блока (enum index)
+    },
+    occupy_block: struct {
+        worker_id: u8,
+        request_id: u64,
+        hash: [32]u8,
+        data_size: u64,
+    },
+    release_block: struct {
+        worker_id: u8,
+        request_id: u64,
+        hash: [32]u8,
+    },
+    get_address: struct {
+        worker_id: u8,
+        request_id: u64,
+        hash: [32]u8,
+    },
+};
+```
+
+#### От Controller → Worker
+```zig
+const MessageFromController = union(enum) {
+    // Успешные результаты
+    allocate_result: struct {
+        worker_id: u8,
+        request_id: u64,
+        offset: u64,
+        size: u8,
+        block_num: u64,
+    },
+    occupy_result: struct {
+        worker_id: u8,
+        request_id: u64,
+    },
+    release_result: struct {
+        worker_id: u8,
+        request_id: u64,
+    },
+    get_address_result: struct {
+        worker_id: u8,
+        request_id: u64,
+        offset: u64,
+        size: u64,
+    },
+
+    // Одно общее сообщение об ошибке
+    error: struct {
+        worker_id: u8,
+        request_id: u64,
+        message: []const u8,
+    },
+};
+```
 
 ---
 

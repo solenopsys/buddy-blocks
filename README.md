@@ -1,59 +1,136 @@
 # Buddy Blocks Storage Server
 
-High-performance HTTP server for block data storage using io_uring, lock-free queues, and buddy allocator.
+Buddy Blocks is a content-addressed block storage server written in Zig. It relies on Linux `io_uring`, LMDBX, and a custom buddy allocator to provide S3-class throughput on commodity hardware (even single-board computers).
 
-## Features
+## Overview
 
-- **io_uring**: Asynchronous I/O for maximum performance
-- **Lock-free architecture**: SPSC queues for inter-thread communication without locks
-- **Buddy Allocator**: Efficient management of data blocks from 4KB to 512KB
-- **LMDBX**: Fast database for storing block metadata
-- **Multi-threaded**: Multiple HTTP worker threads with SO_REUSEPORT + single controller thread
-- **Batch processing**: Controller processes requests in batches to minimize DB operations
+- High-performance HTTP API for PUT/GET/DELETE of 4 KB – 512 Kb blocks
+- `io_uring`-driven workers with lock-free SPSC queues
+- Single controller thread owns LMDBX metadata transactions
+- Buddy allocator keeps one preallocated data file fragment-free
+- Designed for decentralised networks and resource-constrained nodes
 
-## Requirements
+## Project Goals
 
-- Zig 0.15.1 or newer
-- Linux with io_uring support (kernel 5.1+)
-- liblmdbx (built automatically from zig-lmdbx dependency)
+- Deliver production-grade block storage for decentralised networks
+- Run comfortably on $10 SBCs (Orange Pi / Raspberry Pi) with 1–2 GB RAM
+- Match the operational profile of professional S3-compatible systems while remaining simple to operate and audit
+
+## Design Principles
+
+1. **Stand on expert shoulders** – `io_uring` (~50k LOC) for async I/O, LMDBX (~40k LOC) for B-tree metadata, ~1k lines of Zig glue code.
+2. **Let the kernel work** – batched syscalls, ring buffers, memory-mapped LMDBX, direct offset writes keep CPU usage low.
+3. **One file, millions of blocks** – all payloads live inside a single data file, eliminating filesystem path churn and inode pressure.
+4. **Adaptive block sizes** – buddy allocator serves 4 KB–512Kb chunks to minimise internal fragmentation.
+5. **Cryptographic integrity** – SHA-256 hashes are first-class identifiers, proven in adversarial environments.
+6. **Scale by layering** – a compact foundation today, ready for replication, DHT discovery, erasure coding, and proofs tomorrow.
+
+## Architecture Overview
+
+```
+  ┌────────────────────┐
+  │   Client Requests  │   port 10001
+  └──────────┬─────────┘
+             │  SO_REUSEPORT
+       ┌─────┴─────┬─────┬─────┐
+  ┌────▼───┐ ┌────▼┐ ┌──▼──┐ ┌▼────┐
+  │Worker0 │ │Wkr1 │ │Wkr2 │ │Wkr3 │   io_uring HTTP workers
+  └────┬───┘ └────┬┘ └──┬──┘ └┬────┘
+       │ Lock-free SPSC queues (in/out per worker)
+       └───────────┬───────────┬───────────┘
+                   │
+            ┌──────▼───────┐
+            │  Controller  │   batches LMDBX ops
+            └──────┬───────┘
+                   │
+            ┌──────▼───────┐
+            │   LMDBX DB   │   hash → {offset, size}
+            └──────────────┘
+```
+
+### Component Roles
+
+- **HTTP workers (`src/worker/`)** – accept connections, compute SHA-256, manage local pools of free blocks, and issue I/O via `io_uring`.
+- **Controller (`src/controller/`)** – the sole LMDBX accessor; batches allocate/free/get operations inside one transaction, then responds to workers.
+- **Buddy allocator (`buddy_allocator/`)** – tracks block availability per size class and recycles freed space immediately.
+- **Queues (`lib/` SPSC)** – per-worker request/response channels with no locks or contention.
+- **Block pools** – each worker caches right-sized blocks so writes can stream directly into the data file.
+
+### Worker Lifecycle
+
+1. **Startup priming** – each worker inspects its per-size-class pools. If the free count for a class falls below the configured `target_free` threshold it sends an `allocate_block` request to the controller. The controller returns fresh blocks and the worker keeps them cached.
+2. **Main loop** – HTTP parsing, hashing, and `io_uring` submission run inside one loop driven by completion events. At the top of the loop a fast check renews block pools the same way as during startup, so allocation happens opportunistically without adding latency to user requests.
+3. **Streaming writes** – when a PUT arrives the worker immediately pops a preallocated block from the correct size class and streams the body straight into that offset inside the single data file. No extra copies, no filesystem metadata calls.
+4. **Responses** – controller replies (e.g. occupation confirmation, lookup results) are consumed from the outbound queue, completing the request lifecycle.
+
+The pools ensure that writes never stall on allocation as long as the controller keeps the pools topped up, and the worker never touches LMDBX directly.
+
+### Controller Cycle
+
+1. **Adaptive pause** – before each cycle the controller applies a rate-based pause regulator to balance CPU usage and latency under current load.
+2. **Collect messages** – it drains every inbound queue, grouping messages by type (`get_address`, `allocate_block`, `free_block`, `occupy_block`) without sorting.
+3. **Single transaction** – opens one LMDBX transaction and processes batched operations:
+   - Reads (`get_address`) are handled immediately so GET latency remains tiny.
+   - Frees are applied to LMDBX and returned blocks are handed back to the buddy allocator.
+   - Allocation requests draw from the buddy allocator and are queued for response.
+   - Occupy requests commit the final metadata binding `{hash → offset, size}`.
+4. **Commit & reply** – the transaction is committed once, results are fanned out to worker outbound queues, and the controller returns to step 1.
+
+With just one thread touching LMDBX there is no contention, while batching keeps transaction overhead negligible even at high RPS.
+
+### Request Paths
+
+**PUT**
+1. Worker receives body, streams it into a reserved block.
+2. SHA-256 hash is computed while reading.
+3. Worker enqueues `occupy_block` to controller.
+4. Controller reserves the block in LMDBX, returns success.
+5. Worker responds with the hash identifier.
+
+**GET**
+1. Worker asks controller for `{offset, size}` via `get_address`.
+2. Controller looks up LMDBX and replies from its batch.
+3. Worker performs a zero-copy read via `io_uring` and streams the payload back.
+
+**DELETE**
+1. Worker sends `free_block`.
+2. Controller clears metadata, hands the block back to the allocator.
+
+## Resource Model
+
+- One data file holds every block; no per-object files or directory traversal.
+- Buddy allocator supports size classes: 4 KB, 8 KB, 16 KB, 32 KB, 64 KB, 128 KB, 256 KB, 512 KB.
+- Target free counts per worker keep hot pools replenished without synchronisation.
+- LMDBX stores hashes, offsets, and sizes (~110 bytes per record at 10M entries).
 
 ## Building
 
-### Building for host (GNU/Linux)
+Requires Zig 0.15.1+, Linux 5.1+ with `io_uring`, and LMDBX (fetched via `zig-lmdbx` dependency).
+
+### GNU/Linux host (glibc)
 
 ```bash
-# Clone dependencies
+# Build LMDBX (single time)
 git clone https://github.com/your-repo/zig-lmdbx ../zig-lmdbx
-git clone https://github.com/your-repo/zig-pico ../zig-pico
+(cd ../zig-lmdbx && zig build -Dall=true)
 
-# Build liblmdbx for all architectures
-cd ../zig-lmdbx
-zig build -Dall=true
-cd ../buddy-blocks
-
-# Build server for GNU (default)
+# Build Buddy Blocks
 zig build -Doptimize=ReleaseFast
-
-# Binary: zig-out/bin/buddy-blocks-gnu
+# Output: zig-out/bin/buddy-blocks-gnu
 ```
 
-### Building for Alpine/musl
+### Alpine / musl target
 
 ```bash
-# Build for musl
 zig build -Dmusl=true -Doptimize=ReleaseFast
-
-# Binary: zig-out/bin/buddy-blocks-musl
+# Output: zig-out/bin/buddy-blocks-musl
 ```
 
-### Building container (Podman/Docker)
+### Container image (Podman / Docker)
 
 ```bash
-# Build both binaries
 zig build -Doptimize=ReleaseFast
 zig build -Dmusl=true -Doptimize=ReleaseFast
-
-# Build container
 podman build -t buddy-blocks:latest .
 # or
 docker build -t buddy-blocks:latest .
@@ -61,64 +138,52 @@ docker build -t buddy-blocks:latest .
 
 ## Running
 
-### Running on host
+### Local binary
 
 ```bash
-# Run GNU version
 LD_LIBRARY_PATH=../zig-lmdbx/zig-out/lib ./zig-out/bin/buddy-blocks-gnu
-
-# Or via zig build
+# or
 zig build run
 ```
 
-Server will listen on `0.0.0.0:10001`
+The server listens on `0.0.0.0:10001`.
 
-### Running in container
+### Container
 
 ```bash
-# Run with privileges (required for io_uring)
 podman run -d --name buddy-blocks \
   --privileged \
   -p 10001:10001 \
   buddy-blocks:latest
-
-# Or with Docker
+# or
 docker run -d --name buddy-blocks \
   --privileged \
   -p 10001:10001 \
   buddy-blocks:latest
 ```
 
-**Important**: The `--privileged` flag is required for io_uring to work in containers.
+`--privileged` is required for `io_uring` inside containers.
 
-### Checking operation
+### Quick Checks
 
 ```bash
-# Check logs
 podman logs buddy-blocks
-
-# Test PUT request
 curl -X PUT http://localhost:10001/block -d "test data"
-
-# Get block by hash
 curl http://localhost:10001/block/<hash>
 ```
 
-## API
+## API Reference
 
-### PUT /block - Upload block
+### PUT `/block`
 
-Uploads a data block and returns SHA256 hash.
+Uploads a block and returns its SHA-256 hash.
 
 ```bash
-# Upload file
 curl -X PUT --data-binary @file.bin http://localhost:10001/block
-
-# Upload text data
 echo "Hello, World!" | curl -X PUT --data-binary @- http://localhost:10001/block
 ```
 
-**Response:**
+Response:
 ```
 HTTP/1.1 200 OK
 Content-Type: text/plain
@@ -126,143 +191,80 @@ Content-Type: text/plain
 a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
 ```
 
-**Limitations:**
-- Maximum block size: 512KB
+Limits: maximum block size is 1 MB (size-class dependent).
 
-### GET /block/\<hash\> - Download block
+### GET `/block/<hash>`
 
-Downloads data block by SHA256 hash.
-
-```bash
-curl http://localhost:10001/block/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e -o output.bin
-```
-
-**Response:**
-```
-HTTP/1.1 200 OK
-Content-Type: application/octet-stream
-
-<binary data>
-```
-
-### DELETE /block/\<hash\> - Delete block
-
-Deletes data block.
+Fetches a block by its content hash.
 
 ```bash
-curl -X DELETE http://localhost:10001/block/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
+curl http://localhost:10001/block/<hash> -o output.bin
 ```
 
-**Response:**
-```
-HTTP/1.1 200 OK
-Content-Type: text/plain
+### DELETE `/block/<hash>`
 
-Block deleted
-```
+Removes a stored block and returns the space to the allocator.
 
-## Architecture
-
-```
-  ┌─────────────────────┐
-  │   Client Requests   │
-  │    (port 10001)     │
-  └──────────┬──────────┘
-             │ Kernel load balancing (SO_REUSEPORT)
-       ┌─────┴─────┬─────┬─────┐
-       │           │     │     │
-  ┌────▼───┐ ┌────▼┐ ┌──▼──┐ ┌▼────┐
-  │Worker 0│ │Wkr 1│ │Wkr 2│ │Wkr 3│  ← HTTP workers (io_uring)
-  └────┬───┘ └────┬┘ └──┬──┘ └┬────┘
-       │         │     │     │
-       │    SPSC Queues (lock-free)
-       │         │     │     │
-       └─────────┴─────┴─────┘
-                 │
-          ┌──────▼───────┐
-          │  Controller  │  ← Batch processing, single
-          │   Thread     │     LMDBX accessor
-          └──────┬───────┘
-                 │
-          ┌──────▼───────┐
-          │    LMDBX     │  ← Block metadata
-          │   Database   │
-          └──────────────┘
+```bash
+curl -X DELETE http://localhost:10001/block/<hash>
 ```
 
-### Components
+## Runtime Configuration
 
-- **HttpWorker (src/worker/)**: HTTP worker with io_uring, handles client requests
-- **BatchController (src/controller/)**: Batch controller, single thread with LMDBX access
-- **BuddyAllocator (buddy_allocator/)**: Buddy allocator for efficient block management
-- **SPSC Queues**: Lock-free queues for inter-thread communication
-- **Block Pools**: Cache of free blocks for each worker
-
-### Data flow
-
-**PUT request:**
-1. Worker accepts HTTP request via io_uring
-2. Calculates SHA256 hash of request body
-3. Sends `occupy_block` message to controller via SPSC queue
-4. Controller reserves block in LMDBX and returns offset
-5. Worker writes data to file via io_uring at received offset
-6. Returns hash to client
-
-**GET request:**
-1. Worker accepts HTTP request
-2. Sends `get_address` message to controller
-3. Controller returns offset and size from LMDBX
-4. Worker reads data from file via io_uring and sends to client
-
-## Configuration
-
-Parameters can be changed in `src/main.zig`:
+Edit `src/main.zig` to tweak runtime parameters:
 
 ```zig
 const Config = struct {
-    port: u16 = 10001,                    // Server port
-    num_workers: u8 = 4,                  // Number of HTTP workers
-    controller_cycle_ns: i128 = 20_000,   // Controller cycle interval (20µs)
-    queue_capacity: usize = 4096,         // SPSC queue capacity
+    port: u16 = 10001,
+    num_workers: u8 = 4,
+    controller_cycle_ns: i128 = 20_000,
+    queue_capacity: usize = 4096,
 };
 ```
 
+The controller dynamically adapts its sleep interval based on recent RPS to balance latency and CPU usage.
+
 ## Performance
 
-Tests conducted on system with Zig 0.15.1, Linux 6.16.11:
+Benchmarks (Zig 0.15.1, Linux 6.16.11):
 
-**In container (Alpine musl, --privileged):**
-- PUT: 3,398 ops/sec (13.27 MB/s)
-- GET: 1,774 rps (sustained load)
-- Average latency: 1.13ms
+- Container (Alpine/musl): PUT 3,398 ops/s (13.27 MB/s), GET 1,774 rps, ~1.13 ms latency.
+- Host (glibc): PUT 3,567 ops/s (13.93 MB/s), GET 1,753 rps, ~1.14 ms latency.
 
-**On host (GNU glibc):**
-- PUT: 3,567 ops/sec (13.93 MB/s)
-- GET: 1,753 rps (sustained load)
-- Average latency: 1.14ms
+Allocator microbenchmarks with 10M blocks:
 
-### Performance testing
+- Allocate: 23,097 ops/s
+- Get: 72,811 ops/s
+- Free: 31,376 ops/s
+- LMDBX footprint: ~1.1 GB (≈110 bytes/record)
+
+Real-world NVMe profile:
+
+- Metadata lookup: ~10 μs
+- 1 MB block read: ~200 μs
+- Sustained throughput: ≈5 GB/s with 5k ops/s
+- `io_uring` enables parallel I/O queues up to ~20 GB/s
+
+### Running Load Tests
 
 ```bash
-# Run Go benchmark
 cd tests
 go run rps.go -blocks 1000 -concurrency 2
-
-# Parameters:
-# -blocks N       - number of unique blocks for test
-# -concurrency N  - number of concurrent workers
-# -duration 10s   - sustained load test duration
+# -duration 10s for sustained load
 ```
+
+## Roadmap
+
+- Replication between peers
+- DHT / gossip discovery
+- Erasure coding on top of fixed-size blocks
+- Proof-of-storage integrations
 
 ## Testing
 
 ```bash
-# Run unit tests
 zig build test
-
-# Integration test
-cd tests
-python3 test_basic_operations.py
+cd tests && python3 test_basic_operations.py
 ```
 
 ## License

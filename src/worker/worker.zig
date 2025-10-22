@@ -198,11 +198,17 @@ pub const HttpWorker = struct {
         _ = try self.ring.accept(accept_user_data, self.server_socket, null, null, 0);
 
         while (self.running.load(.monotonic)) {
-            // Используем submit_and_wait с минимальным ожиданием 1 события
-            // Это блокирует выполнение пока не появится хотя бы одно событие
-            _ = try self.ring.submit_and_wait(1);
+            // Non-blocking submit всех pending операций
+            _ = try self.ring.submit();
 
             // Обрабатываем все готовые CQE
+            const ready = self.ring.cq_ready();
+            if (ready == 0) {
+                // Если нет готовых событий - короткая пауза чтобы не крутить CPU
+                std.Thread.sleep(10_000); // 10µs
+                continue;
+            }
+
             while (self.ring.cq_ready() > 0) {
                 const cqe = try self.ring.copy_cqe();
 

@@ -44,10 +44,10 @@ pub const PauseRegulator = struct {
                 self.last_check_time = now;
 
                 // Вычисляем паузу на основе RPS
-                // При RPS >= 10000: без паузы
-                // При RPS > 0 и < 10000: пауза = 1мс
+                // При RPS >= 1000: без паузы
+                // При RPS > 0 и < 1000: пауза = 1мс
                 // При RPS = 0: пауза = 100мс (холостой режим)
-                self.current_pause_ns = if (self.last_rps >= 10_000)
+                self.current_pause_ns = if (self.last_rps >= 1_000)
                     0
                 else if (self.last_rps > 0)
                     1_000_000
