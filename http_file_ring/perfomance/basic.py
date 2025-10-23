@@ -53,18 +53,6 @@ for i in range(ITERATIONS):
             if returned_hash == expected_hash:
                 print(f"  ✓ Хеш совпадает!")
                 stored_hashes.append(returned_hash)
-
-                # GET запрос для проверки
-                get_response = requests.get(f"{SERVER_URL}/{returned_hash}", timeout=5)
-                print(f"  GET статус: {get_response.status_code}")
-
-                if get_response.status_code == 200:
-                    if get_response.content == current_block:
-                        print(f"  ✓ Данные совпадают!")
-                    else:
-                        print(f"  ✗ Данные не совпадают!")
-                else:
-                    print(f"  ✗ Ошибка чтения: {get_response.text[:100]}")
             else:
                 print(f"  ✗ Хеш не совпадает!")
         else:
