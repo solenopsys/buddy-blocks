@@ -2,6 +2,7 @@
 import requests
 import hashlib
 import random
+import time
 
 SERVER_URL = "http://localhost:8080"
 
@@ -23,9 +24,11 @@ print(f"Блок 2 - SHA256: {hash2}")
 # Словарь для хранения хешей
 stored_hashes = []
 
-# Цикл из 10 итераций
-ITERATIONS = 10
+# Цикл из 1000 итераций
+ITERATIONS = 1000
 print(f"\nЗапуск {ITERATIONS} итераций (чередование блоков 1 и 2)...")
+
+start_time = time.time()
 
 for i in range(ITERATIONS):
     # Выбираем блок: четные итерации - блок 1, нечетные - блок 2
@@ -38,29 +41,32 @@ for i in range(ITERATIONS):
         block_num = 2
         expected_hash = hash2
 
-    print(f"\n[Итерация {i+1}] Отправка блока {block_num}")
+    if (i + 1) % 100 == 0:
+        print(f"[Итерация {i+1}] Отправка блока {block_num}")
 
     try:
         # PUT запрос
         response = requests.put(f"{SERVER_URL}", data=current_block, timeout=5)
-        print(f"  PUT статус: {response.status_code}")
 
         if response.status_code == 200:
             returned_hash = response.text.strip()
-            print(f"  Возвращенный хеш: {returned_hash}")
-            print(f"  Ожидаемый хеш:   {expected_hash}")
-
             if returned_hash == expected_hash:
-                print(f"  ✓ Хеш совпадает!")
                 stored_hashes.append(returned_hash)
             else:
-                print(f"  ✗ Хеш не совпадает!")
+                print(f"  ✗ Хеш не совпадает на итерации {i+1}!")
         else:
-            print(f"  ✗ Ошибка: {response.text[:100]}")
+            print(f"  ✗ Ошибка на итерации {i+1}: {response.status_code}")
 
     except Exception as e:
-        print(f"  ✗ Исключение: {e}")
+        print(f"  ✗ Исключение на итерации {i+1}: {e}")
+
+end_time = time.time()
+elapsed = end_time - start_time
 
 print("\n" + "="*60)
-print(f"Тестирование завершено. Сохранено блоков: {len(stored_hashes)}")
+print(f"Тестирование завершено")
+print(f"Сохранено блоков: {len(stored_hashes)}")
+print(f"Время выполнения: {elapsed:.2f} секунд")
+print(f"Скорость: {ITERATIONS / elapsed:.2f} блоков/сек")
+print(f"Пропускная способность: {(ITERATIONS * 4096) / (1024 * 1024 * elapsed):.2f} МБ/сек")
 print("="*60)
