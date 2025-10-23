@@ -72,6 +72,8 @@ pub const HttpServer = struct {
                 .accept => try self.handleAccept(cqe.res),
                 .recv_header => try self.handleHeader(context, cqe.res),
                 .pipeline => try self.handlePipeline(context, cqe.res),
+                .read_block => try self.handleReadBlock(context, cqe.res),
+                .send_response => try self.handleSendResponse(context, cqe.res),
             }
         }
     }
@@ -133,11 +135,33 @@ pub const HttpServer = struct {
 
         _ = picozig.parseRequest(data, &httpRequest);
 
-        // Получаем Content-Length
-        const content_length = getContentLength(&httpRequest);
-        if (content_length == 0) {
+        // Определяем метод
+        const method = httpRequest.params.method;
+
+        if (std.mem.eql(u8, method, "PUT")) {
+            try self.handlePut(ctx, &httpRequest);
+        } else if (std.mem.eql(u8, method, "GET")) {
+            try self.handleGet(ctx, &httpRequest);
+        } else if (std.mem.eql(u8, method, "DELETE")) {
+            try self.handleDelete(ctx, &httpRequest);
+        } else {
+            // Неподдерживаемый метод
+            const response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             self.allocator.free(buffer);
+            self.allocator.destroy(ctx);
+        }
+    }
+
+    fn handlePut(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest) !void {
+        // Получаем Content-Length
+        const content_length = getContentLength(req);
+        if (content_length == 0) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
             self.allocator.destroy(ctx);
             return;
         }
@@ -170,7 +194,169 @@ pub const HttpServer = struct {
         try self.ring.queueSplice(ctx.conn_fd, -1, pipes1[1], -1, @intCast(content_length), @intFromPtr(splice_ctx));
         _ = try self.ring.submit();
 
-        self.allocator.free(buffer);
+        if (ctx.buffer) |buf| self.allocator.free(buf);
+        self.allocator.destroy(ctx);
+    }
+
+    fn handleGet(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest) !void {
+        const path = req.params.path;
+
+        // Проверяем что путь начинается с /
+        if (path.len < 2 or path[0] != '/') {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        // Парсим хеш из пути (убираем начальный /)
+        const hex_hash = path[1..];
+        if (hex_hash.len != 64) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        // Конвертируем hex в bytes
+        var hash: [32]u8 = undefined;
+        for (0..32) |i| {
+            hash[i] = std.fmt.parseInt(u8, hex_hash[i * 2 .. i * 2 + 2], 16) catch {
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                _ = try posix.send(ctx.conn_fd, response, 0);
+                posix.close(ctx.conn_fd);
+                if (ctx.buffer) |buf| self.allocator.free(buf);
+                self.allocator.destroy(ctx);
+                return;
+            };
+        }
+
+        // Запрашиваем адрес блока у сервиса
+        const block_info = self.service.onBlockAddressRequest(hash);
+        const offset = block_info.block_num * 4096;
+        const block_size: u64 = 4096;
+
+        // Отправляем HTTP заголовки
+        var header_buf: [256]u8 = undefined;
+        const headers = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{block_size}) catch unreachable;
+        _ = try posix.send(ctx.conn_fd, headers, 0);
+
+        // Создаем pipe для splice
+        const pipes = try posix.pipe();
+
+        // Сохраняем контекст для продолжения
+        const read_ctx = try self.allocator.create(OpContext);
+        read_ctx.* = .{
+            .op_type = .read_block,
+            .conn_fd = ctx.conn_fd,
+            .block_info = block_info,
+            .content_length = block_size,
+            .hash = hash,
+            .buffer = null,
+            .pipeline_state = null,
+        };
+
+        // Сохраняем информацию о pipe в OpContext используя pipeline_state как указатель
+        const pipe_state = try self.allocator.create(interfaces.PipelineState);
+        pipe_state.* = interfaces.PipelineState.init(pipes[0], pipes[1], -1, -1);
+        read_ctx.pipeline_state = pipe_state;
+
+        // Запускаем splice: file -> pipe (используем queueSplice из ring напрямую)
+        try self.ring.queueSplice(self.file_storage.fd, @intCast(offset), pipes[1], -1, @intCast(block_size), @intFromPtr(read_ctx));
+        _ = try self.ring.submit();
+
+        if (ctx.buffer) |buf| self.allocator.free(buf);
+        self.allocator.destroy(ctx);
+    }
+
+    fn handleReadBlock(self: *HttpServer, ctx: *OpContext, res: i32) !void {
+        const state = ctx.pipeline_state orelse return error.NoPipelineState;
+
+        if (res < 0) {
+            std.debug.print("Read block failed: {d}\n", .{res});
+            const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+            _ = posix.send(ctx.conn_fd, response, 0) catch {};
+            posix.close(ctx.conn_fd);
+            state.cleanup();
+            self.allocator.destroy(state);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        // Splice из файла в pipe завершен, теперь splice из pipe в socket
+        // Закрываем write конец pipe
+        posix.close(state.pipe1_write);
+
+        // Запускаем splice: pipe -> socket
+        try self.ring.queueSplice(state.pipe1_read, -1, ctx.conn_fd, -1, @intCast(ctx.content_length), @intFromPtr(ctx));
+        ctx.op_type = .send_response; // Меняем тип операции
+        _ = try self.ring.submit();
+    }
+
+    fn handleSendResponse(self: *HttpServer, ctx: *OpContext, res: i32) !void {
+        const state = ctx.pipeline_state orelse return error.NoPipelineState;
+
+        if (res < 0) {
+            std.debug.print("Send response failed: {d}\n", .{res});
+        }
+
+        // Закрываем соединение и очищаем ресурсы
+        posix.close(ctx.conn_fd);
+        state.cleanup();
+        self.allocator.destroy(state);
+        self.allocator.destroy(ctx);
+    }
+
+    fn handleDelete(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest) !void {
+        const path = req.params.path;
+
+        // Проверяем что путь начинается с /
+        if (path.len < 2 or path[0] != '/') {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        // Парсим хеш из пути (убираем начальный /)
+        const hex_hash = path[1..];
+        if (hex_hash.len != 64) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        // Конвертируем hex в bytes
+        var hash: [32]u8 = undefined;
+        for (0..32) |i| {
+            hash[i] = std.fmt.parseInt(u8, hex_hash[i * 2 .. i * 2 + 2], 16) catch {
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                _ = try posix.send(ctx.conn_fd, response, 0);
+                posix.close(ctx.conn_fd);
+                if (ctx.buffer) |buf| self.allocator.free(buf);
+                self.allocator.destroy(ctx);
+                return;
+            };
+        }
+
+        // Запрашиваем освобождение блока у сервиса
+        _ = self.service.onFreeBlockRequest(hash);
+
+        // Отправляем успешный ответ
+        const response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        _ = try posix.send(ctx.conn_fd, response, 0);
+        posix.close(ctx.conn_fd);
+
+        if (ctx.buffer) |buf| self.allocator.free(buf);
         self.allocator.destroy(ctx);
     }
 
@@ -274,8 +460,15 @@ pub const HttpServer = struct {
         if (!state.isComplete()) return;
 
         // Все операции завершены!
-        // Отправляем ответ клиенту
-        const response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        // Формируем хеш в hex формате
+        var hex_hash: [64]u8 = undefined;
+        for (ctx.hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_hash[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
+        }
+
+        // Отправляем ответ с хешем
+        var response_buf: [256]u8 = undefined;
+        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ hex_hash.len, hex_hash }) catch unreachable;
         _ = try posix.send(ctx.conn_fd, response, 0);
         posix.close(ctx.conn_fd);
 
@@ -286,15 +479,29 @@ pub const HttpServer = struct {
 };
 
 fn createSocket(port: u16) !posix.fd_t {
-    const socket = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP);
+    const socket = posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP) catch |err| {
+        std.debug.print("ERROR: Failed to create socket: {}\n", .{err});
+        return err;
+    };
     errdefer posix.close(socket);
 
     const yes: i32 = 1;
-    try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&yes));
+    posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&yes)) catch |err| {
+        std.debug.print("ERROR: Failed to set SO_REUSEADDR: {}\n", .{err});
+        return err;
+    };
 
     const address = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    try posix.bind(socket, &address.any, address.getOsSockLen());
-    try posix.listen(socket, 128);
+    posix.bind(socket, &address.any, address.getOsSockLen()) catch |err| {
+        std.debug.print("ERROR: Failed to bind to port {d}: {}\n", .{ port, err });
+        std.debug.print("       Port is already in use. Please stop the existing server first.\n", .{});
+        return err;
+    };
+
+    posix.listen(socket, 128) catch |err| {
+        std.debug.print("ERROR: Failed to listen on port {d}: {}\n", .{ port, err });
+        return err;
+    };
 
     return socket;
 }

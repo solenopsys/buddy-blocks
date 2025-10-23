@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import requests
 import hashlib
+import random
 
 SERVER_URL = "http://localhost:8080"
 
@@ -8,34 +9,70 @@ print("="*60)
 print("Тестирование HTTP сервера с io_uring + splice + AF_ALG")
 print("="*60)
 
-# Запрос 1: Простые тестовые данные 4KB
-print("\n[Запрос 1] Отправка данных 'A' * 4KB")
-data1 = b"A" * (4 * 1024)
-hash1 = hashlib.sha256(data1).hexdigest()
-print(f"  Размер: {len(data1)} байт")
-print(f"  SHA256 (локально): {hash1}")
+# Генерируем 2 случайных блока по 4KB
+print("\nГенерация 2 блоков данных по 4KB...")
+block1 = bytes(random.getrandbits(8) for _ in range(4 * 1024))
+block2 = bytes(random.getrandbits(8) for _ in range(4 * 1024))
 
-try:
-    response1 = requests.put(f"{SERVER_URL}", data=data1, timeout=5)
-    print(f"  Статус: {response1.status_code}")
-    print(f"  Ответ: {response1.text[:100] if response1.text else 'пусто'}")
-except Exception as e:
-    print(f"  Ошибка: {e}")
+hash1 = hashlib.sha256(block1).hexdigest()
+hash2 = hashlib.sha256(block2).hexdigest()
 
-# Запрос 2: Другие тестовые данные 8KB
-print("\n[Запрос 2] Отправка данных 'B' * 8KB")
-data2 = b"B" * (8 * 1024)
-hash2 = hashlib.sha256(data2).hexdigest()
-print(f"  Размер: {len(data2)} байт")
-print(f"  SHA256 (локально): {hash2}")
+print(f"Блок 1 - SHA256: {hash1}")
+print(f"Блок 2 - SHA256: {hash2}")
 
-try:
-    response2 = requests.put(f"{SERVER_URL}", data=data2, timeout=5)
-    print(f"  Статус: {response2.status_code}")
-    print(f"  Ответ: {response2.text[:100] if response2.text else 'пусто'}")
-except Exception as e:
-    print(f"  Ошибка: {e}")
+# Словарь для хранения хешей
+stored_hashes = []
+
+# Цикл из 10 итераций
+ITERATIONS = 10
+print(f"\nЗапуск {ITERATIONS} итераций (чередование блоков 1 и 2)...")
+
+for i in range(ITERATIONS):
+    # Выбираем блок: четные итерации - блок 1, нечетные - блок 2
+    if i % 2 == 0:
+        current_block = block1
+        block_num = 1
+        expected_hash = hash1
+    else:
+        current_block = block2
+        block_num = 2
+        expected_hash = hash2
+
+    print(f"\n[Итерация {i+1}] Отправка блока {block_num}")
+
+    try:
+        # PUT запрос
+        response = requests.put(f"{SERVER_URL}", data=current_block, timeout=5)
+        print(f"  PUT статус: {response.status_code}")
+
+        if response.status_code == 200:
+            returned_hash = response.text.strip()
+            print(f"  Возвращенный хеш: {returned_hash}")
+            print(f"  Ожидаемый хеш:   {expected_hash}")
+
+            if returned_hash == expected_hash:
+                print(f"  ✓ Хеш совпадает!")
+                stored_hashes.append(returned_hash)
+
+                # GET запрос для проверки
+                get_response = requests.get(f"{SERVER_URL}/{returned_hash}", timeout=5)
+                print(f"  GET статус: {get_response.status_code}")
+
+                if get_response.status_code == 200:
+                    if get_response.content == current_block:
+                        print(f"  ✓ Данные совпадают!")
+                    else:
+                        print(f"  ✗ Данные не совпадают!")
+                else:
+                    print(f"  ✗ Ошибка чтения: {get_response.text[:100]}")
+            else:
+                print(f"  ✗ Хеш не совпадает!")
+        else:
+            print(f"  ✗ Ошибка: {response.text[:100]}")
+
+    except Exception as e:
+        print(f"  ✗ Исключение: {e}")
 
 print("\n" + "="*60)
-print("Тестирование завершено")
+print(f"Тестирование завершено. Сохранено блоков: {len(stored_hashes)}")
 print("="*60)

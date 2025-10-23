@@ -5,6 +5,8 @@ pub const OpType = enum {
     accept,
     recv_header,
     pipeline, // общий контекст для всех операций pipeline
+    read_block, // чтение блока для GET
+    send_response, // отправка ответа
 };
 
 /// Какая операция завершилась
