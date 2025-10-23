@@ -24,10 +24,9 @@ pub const MockWorkerService = struct {
 
     fn onBlockInputRequest(ptr: *anyopaque, size_index: u8) BlockInfo {
         const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
+        _ = size_index;
         const block_num = self.next_block;
         self.next_block += 1;
-
-        std.debug.print("MockService: onBlockInputRequest(size_index={d}) -> block_num={d}\n", .{ size_index, block_num });
 
         return BlockInfo{
             .block_num = block_num,
@@ -37,20 +36,13 @@ pub const MockWorkerService = struct {
 
     fn onHashForBlock(ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo) void {
         _ = ptr;
-        std.debug.print("MockService: onHashForBlock(block_num={d}, size_index={d}, hash=", .{ block_info.block_num, block_info.size_index });
-        for (hash[0..8]) |byte| {
-            std.debug.print("{x:0>2}", .{byte});
-        }
-        std.debug.print("...)\n", .{});
+        _ = hash;
+        _ = block_info;
     }
 
     fn onFreeBlockRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {
         _ = ptr;
-        std.debug.print("MockService: onFreeBlockRequest(hash=", .{});
-        for (hash[0..8]) |byte| {
-            std.debug.print("{x:0>2}", .{byte});
-        }
-        std.debug.print("...)\n", .{});
+        _ = hash;
 
         return BlockInfo{
             .block_num = 0,
@@ -60,11 +52,7 @@ pub const MockWorkerService = struct {
 
     fn onBlockAddressRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {
         _ = ptr;
-        std.debug.print("MockService: onBlockAddressRequest(hash=", .{});
-        for (hash[0..8]) |byte| {
-            std.debug.print("{x:0>2}", .{byte});
-        }
-        std.debug.print("...)\n", .{});
+        _ = hash;
 
         return BlockInfo{
             .block_num = 0,

@@ -139,7 +139,6 @@ pub const HttpServer = struct {
         // ВАЖНО: body может уже быть в буфере после заголовков!
         const header_len_usize: usize = @intCast(header_len);
         const body_in_buffer = if (header_len > 0 and header_len_usize < data.len) data[header_len_usize..] else &[_]u8{};
-        std.debug.print("recv: {d} bytes total, headers: {d} bytes, body in buffer: {d} bytes\n", .{ bytes_read, header_len, body_in_buffer.len });
 
         // Определяем метод
         const method = httpRequest.params.method;
@@ -185,7 +184,6 @@ pub const HttpServer = struct {
 
         // Если часть body уже в буфере - записываем её в pipe
         if (body_in_buffer.len > 0) {
-            std.debug.print("Writing {d} bytes from buffer to pipe\n", .{body_in_buffer.len});
             const written = try posix.write(pipes1[1], body_in_buffer);
             if (written != body_in_buffer.len) {
                 std.debug.print("ERROR: write to pipe failed: wrote {d} of {d} bytes\n", .{ written, body_in_buffer.len });
@@ -193,7 +191,6 @@ pub const HttpServer = struct {
         }
 
         const remaining_bytes = content_length - body_in_buffer.len;
-        std.debug.print("Body: {d} bytes in buffer, {d} bytes remaining in socket\n", .{ body_in_buffer.len, remaining_bytes });
 
         if (remaining_bytes > 0) {
             // Есть ещё данные в socket - делаем splice
@@ -339,6 +336,8 @@ pub const HttpServer = struct {
             return;
         }
 
+        std.debug.print("handleReadBlock: splice file->pipe completed, {d} bytes (expected {d})\n", .{ res, ctx.content_length });
+
         // Splice из файла в pipe завершен, теперь splice из pipe в socket
         // Закрываем write конец pipe
         posix.close(state.pipe1_write);
@@ -430,8 +429,6 @@ pub const HttpServer = struct {
         // Обрабатываем в зависимости от того, какая операция завершилась
         switch (ctx.pipeline_op) {
             .splice_socket_to_pipe => {
-                std.debug.print("splice_socket_to_pipe completed: {d} bytes (expected {d})\n", .{ res, ctx.content_length });
-
                 // КРИТИЧЕСКАЯ ПРОВЕРКА: если splice вернул 0 байт, данные не прочитались!
                 if (res == 0) {
                     std.debug.print("ERROR: splice(socket->pipe) returned 0 bytes! Socket buffer might be empty or not ready.\n", .{});
@@ -478,8 +475,6 @@ pub const HttpServer = struct {
             },
 
             .tee => {
-                std.debug.print("tee completed: {d} bytes\n", .{res});
-
                 // Закрываем write-конец pipe2
                 posix.close(state.pipe2_write);
                 state.pipe2_write = -1;
@@ -490,8 +485,6 @@ pub const HttpServer = struct {
             },
 
             .splice_to_file => {
-                std.debug.print("splice_to_file completed: {d} bytes\n", .{res});
-
                 // Закрываем read-конец pipe1
                 posix.close(state.pipe1_read);
                 state.pipe1_read = -1;
@@ -502,8 +495,6 @@ pub const HttpServer = struct {
             },
 
             .splice_to_hash => {
-                std.debug.print("splice_to_hash completed: {d} bytes\n", .{res});
-
                 // Закрываем read-конец pipe2
                 posix.close(state.pipe2_read);
                 state.pipe2_read = -1;
