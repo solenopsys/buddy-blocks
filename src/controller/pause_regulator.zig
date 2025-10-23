@@ -15,7 +15,7 @@ pub const PauseRegulator = struct {
             .last_rpc_counter = 0,
             .last_check_time = std.time.nanoTimestamp(),
             .last_rps = 0,
-            .current_pause_ns = 1_000_000, // По умолчанию 1мс
+            .current_pause_ns = 100_000, // По умолчанию 100µs
             .update_counter = 0,
         };
     }
@@ -45,14 +45,11 @@ pub const PauseRegulator = struct {
 
                 // Вычисляем паузу на основе RPS
                 // При RPS >= 1000: без паузы
-                // При RPS > 0 и < 1000: пауза = 1мс
-                // При RPS = 0: пауза = 100мс (холостой режим)
+                // При RPS < 1000: пауза = 100µs
                 self.current_pause_ns = if (self.last_rps >= 1_000)
                     0
-                else if (self.last_rps > 0)
-                    1_000_000
                 else
-                    100_000_000; // 100мс в холостом режиме
+                    100_000; // 100µs
             }
         }
     }

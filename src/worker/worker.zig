@@ -244,9 +244,6 @@ pub const HttpWorker = struct {
 
             // Проверяем и пополняем пулы блоков
             try self.refillPools();
-
-            // Пауза 5ms - баланс между latency и CPU usage
-            std.Thread.sleep(5_000_000); // 5 миллисекунд
         }
     }
 
