@@ -1,5 +1,6 @@
 .claude
 .zig-cache
+.zig-global-cache
 zig-cache
 zig-out
 node_modules

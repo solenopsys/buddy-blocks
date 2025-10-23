@@ -15,8 +15,8 @@ import (
 
 var (
 	SERVER_URL  = "http://localhost:8080"
-	BLOCK_SIZE  = 4096
-	ITERATIONS  = 100
+	BLOCK_SIZE  = 4096 * 2 * 2 * 2 * 2 * 2 * 2 * 2
+	ITERATIONS  = 1000
 	REQ_TIMEOUT = 5 * time.Second
 	NUM_BLOCKS  = 2
 )
