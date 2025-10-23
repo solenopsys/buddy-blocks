@@ -85,7 +85,8 @@ pub const HttpServer = struct {
         }
 
         const conn_fd = res;
-        const buffer = try self.allocator.alloc(u8, 8192);
+        // Буфер 256 байт - достаточно для HTTP заголовков, body останется в socket для splice
+        const buffer = try self.allocator.alloc(u8, 256);
 
         const ctx = try self.allocator.create(OpContext);
         ctx.* = .{
@@ -133,13 +134,18 @@ pub const HttpServer = struct {
             .body = &[_]u8{},
         };
 
-        _ = picozig.parseRequest(data, &httpRequest);
+        const header_len = picozig.parseRequest(data, &httpRequest);
+
+        // ВАЖНО: body может уже быть в буфере после заголовков!
+        const header_len_usize: usize = @intCast(header_len);
+        const body_in_buffer = if (header_len > 0 and header_len_usize < data.len) data[header_len_usize..] else &[_]u8{};
+        std.debug.print("recv: {d} bytes total, headers: {d} bytes, body in buffer: {d} bytes\n", .{ bytes_read, header_len, body_in_buffer.len });
 
         // Определяем метод
         const method = httpRequest.params.method;
 
         if (std.mem.eql(u8, method, "PUT")) {
-            try self.handlePut(ctx, &httpRequest);
+            try self.handlePut(ctx, &httpRequest, body_in_buffer);
         } else if (std.mem.eql(u8, method, "GET")) {
             try self.handleGet(ctx, &httpRequest);
         } else if (std.mem.eql(u8, method, "DELETE")) {
@@ -154,7 +160,7 @@ pub const HttpServer = struct {
         }
     }
 
-    fn handlePut(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest) !void {
+    fn handlePut(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest, body_in_buffer: []const u8) !void {
         // Получаем Content-Length
         const content_length = getContentLength(req);
         if (content_length == 0) {
@@ -177,22 +183,68 @@ pub const HttpServer = struct {
         const pipeline_state = try self.allocator.create(interfaces.PipelineState);
         pipeline_state.* = interfaces.PipelineState.init(pipes1[0], pipes1[1], pipes2[0], pipes2[1]);
 
-        // Создаем контекст для первой операции splice(socket→pipe1)
-        const splice_ctx = try self.allocator.create(OpContext);
-        splice_ctx.* = .{
-            .op_type = .pipeline,
-            .conn_fd = ctx.conn_fd,
-            .block_info = block_info,
-            .content_length = content_length,
-            .hash = undefined,
-            .buffer = null,
-            .pipeline_state = pipeline_state,
-            .pipeline_op = .splice_socket_to_pipe,
-        };
+        // Если часть body уже в буфере - записываем её в pipe
+        if (body_in_buffer.len > 0) {
+            std.debug.print("Writing {d} bytes from buffer to pipe\n", .{body_in_buffer.len});
+            const written = try posix.write(pipes1[1], body_in_buffer);
+            if (written != body_in_buffer.len) {
+                std.debug.print("ERROR: write to pipe failed: wrote {d} of {d} bytes\n", .{ written, body_in_buffer.len });
+            }
+        }
 
-        // Запускаем первую операцию: splice(socket→pipe1)
-        try self.ring.queueSplice(ctx.conn_fd, -1, pipes1[1], -1, @intCast(content_length), @intFromPtr(splice_ctx));
-        _ = try self.ring.submit();
+        const remaining_bytes = content_length - body_in_buffer.len;
+        std.debug.print("Body: {d} bytes in buffer, {d} bytes remaining in socket\n", .{ body_in_buffer.len, remaining_bytes });
+
+        if (remaining_bytes > 0) {
+            // Есть ещё данные в socket - делаем splice
+            const splice_ctx = try self.allocator.create(OpContext);
+            splice_ctx.* = .{
+                .op_type = .pipeline,
+                .conn_fd = ctx.conn_fd,
+                .block_info = block_info,
+                .content_length = content_length,
+                .hash = undefined,
+                .buffer = null,
+                .pipeline_state = pipeline_state,
+                .pipeline_op = .splice_socket_to_pipe,
+            };
+
+            try self.ring.queueSplice(ctx.conn_fd, -1, pipes1[1], -1, @intCast(remaining_bytes), @intFromPtr(splice_ctx));
+            _ = try self.ring.submit();
+        } else {
+            // Все данные уже в pipe, запускаем pipeline сразу
+            posix.close(pipes1[1]); // Закрываем write end
+            pipeline_state.pipe1_write = -1; // Помечаем что уже закрыт
+
+            const offset = block_info.block_num * 4096;
+
+            // Создаем контексты для 3 параллельных операций
+            const tee_ctx = try self.allocator.create(OpContext);
+            tee_ctx.* = .{
+                .op_type = .pipeline,
+                .conn_fd = ctx.conn_fd,
+                .block_info = block_info,
+                .content_length = content_length,
+                .hash = undefined,
+                .buffer = null,
+                .pipeline_state = pipeline_state,
+                .pipeline_op = .tee,
+            };
+
+            const file_ctx = try self.allocator.create(OpContext);
+            file_ctx.* = tee_ctx.*;
+            file_ctx.pipeline_op = .splice_to_file;
+
+            const hash_ctx = try self.allocator.create(OpContext);
+            hash_ctx.* = tee_ctx.*;
+            hash_ctx.pipeline_op = .splice_to_hash;
+
+            // Запускаем 3 операции параллельно
+            try self.ring.queueTee(pipes1[0], pipes2[1], @intCast(content_length), @intFromPtr(tee_ctx));
+            try self.file_storage.queueSplice(pipes1[0], offset, @intCast(content_length), @intFromPtr(file_ctx));
+            try self.ring.queueSplice(pipes2[0], -1, self.hash_socket, -1, @intCast(content_length), @intFromPtr(hash_ctx));
+            _ = try self.ring.submit();
+        }
 
         if (ctx.buffer) |buf| self.allocator.free(buf);
         self.allocator.destroy(ctx);
@@ -290,6 +342,7 @@ pub const HttpServer = struct {
         // Splice из файла в pipe завершен, теперь splice из pipe в socket
         // Закрываем write конец pipe
         posix.close(state.pipe1_write);
+        state.pipe1_write = -1; // Помечаем что закрыт
 
         // Запускаем splice: pipe -> socket
         try self.ring.queueSplice(state.pipe1_read, -1, ctx.conn_fd, -1, @intCast(ctx.content_length), @intFromPtr(ctx));
@@ -377,6 +430,20 @@ pub const HttpServer = struct {
         // Обрабатываем в зависимости от того, какая операция завершилась
         switch (ctx.pipeline_op) {
             .splice_socket_to_pipe => {
+                std.debug.print("splice_socket_to_pipe completed: {d} bytes (expected {d})\n", .{ res, ctx.content_length });
+
+                // КРИТИЧЕСКАЯ ПРОВЕРКА: если splice вернул 0 байт, данные не прочитались!
+                if (res == 0) {
+                    std.debug.print("ERROR: splice(socket->pipe) returned 0 bytes! Socket buffer might be empty or not ready.\n", .{});
+                    const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                    _ = posix.send(ctx.conn_fd, response, 0) catch {};
+                    posix.close(ctx.conn_fd);
+                    state.cleanup();
+                    self.allocator.destroy(state);
+                    self.allocator.destroy(ctx);
+                    return;
+                }
+
                 // Закрываем write-конец pipe1 - больше не нужен
                 posix.close(state.pipe1_write);
                 state.pipe1_write = -1;
@@ -411,6 +478,8 @@ pub const HttpServer = struct {
             },
 
             .tee => {
+                std.debug.print("tee completed: {d} bytes\n", .{res});
+
                 // Закрываем write-конец pipe2
                 posix.close(state.pipe2_write);
                 state.pipe2_write = -1;
@@ -421,6 +490,8 @@ pub const HttpServer = struct {
             },
 
             .splice_to_file => {
+                std.debug.print("splice_to_file completed: {d} bytes\n", .{res});
+
                 // Закрываем read-конец pipe1
                 posix.close(state.pipe1_read);
                 state.pipe1_read = -1;
@@ -431,6 +502,8 @@ pub const HttpServer = struct {
             },
 
             .splice_to_hash => {
+                std.debug.print("splice_to_hash completed: {d} bytes\n", .{res});
+
                 // Закрываем read-конец pipe2
                 posix.close(state.pipe2_read);
                 state.pipe2_read = -1;

@@ -40,7 +40,13 @@ pub const Ring = struct {
     pub fn queueSplice(self: *Ring, fd_in: i32, off_in: i64, fd_out: i32, off_out: i64, len: u32, user_data: u64) !void {
         const off_in_u64 = if (off_in < 0) std.math.maxInt(u64) else @as(u64, @intCast(off_in));
         const off_out_u64 = if (off_out < 0) std.math.maxInt(u64) else @as(u64, @intCast(off_out));
-        _ = try self.ring.splice(user_data, fd_in, off_in_u64, fd_out, off_out_u64, len);
+
+        // SPLICE_F_MOVE = 1 - использовать zero-copy
+        // НЕ используем SPLICE_F_NONBLOCK (2), чтобы операция ждала данных
+        const SPLICE_F_MOVE: u32 = 1;
+
+        const sqe = try self.ring.splice(user_data, fd_in, off_in_u64, fd_out, off_out_u64, len);
+        sqe.rw_flags = SPLICE_F_MOVE;
     }
 
     /// Tee data (split pipe) - нет в stdlib, делаем вручную

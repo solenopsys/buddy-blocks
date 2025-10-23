@@ -1,0 +1,112 @@
+Server starting on port 8080...
+Storage file: storage.dat
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=0
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=0, size_index=0, hash=83b2a785c29cd324...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=83b2a785c29cd324...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=1
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=1, size_index=0, hash=adb4fd745765004c...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=adb4fd745765004c...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=2
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=2, size_index=0, hash=83b2a785c29cd324...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=83b2a785c29cd324...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=3
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=3, size_index=0, hash=adb4fd745765004c...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=adb4fd745765004c...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=4
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=4, size_index=0, hash=83b2a785c29cd324...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=83b2a785c29cd324...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=5
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=5, size_index=0, hash=adb4fd745765004c...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=adb4fd745765004c...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=6
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=6, size_index=0, hash=83b2a785c29cd324...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=83b2a785c29cd324...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=7
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=7, size_index=0, hash=adb4fd745765004c...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=adb4fd745765004c...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=8
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=8, size_index=0, hash=83b2a785c29cd324...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=83b2a785c29cd324...)
+recv: 256 bytes total, headers: 171 bytes, body in buffer: 85 bytes
+MockService: onBlockInputRequest(size_index=0) -> block_num=9
+Writing 85 bytes from buffer to pipe
+Body: 85 bytes in buffer, 4011 bytes remaining in socket
+splice_socket_to_pipe completed: 4011 bytes (expected 4096)
+tee completed: 4096 bytes
+splice_to_file completed: 4096 bytes
+splice_to_hash completed: 4096 bytes
+MockService: onHashForBlock(block_num=9, size_index=0, hash=adb4fd745765004c...)
+recv: 213 bytes total, headers: 213 bytes, body in buffer: 0 bytes
+MockService: onBlockAddressRequest(hash=adb4fd745765004c...)
