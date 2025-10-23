@@ -154,7 +154,7 @@ pub const HttpServer = struct {
             try self.handleDelete(ctx, &httpRequest);
         } else {
             // Неподдерживаемый метод
-            const response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             self.allocator.free(buffer);
@@ -166,7 +166,7 @@ pub const HttpServer = struct {
         // Получаем Content-Length
         const content_length = getContentLength(req);
         if (content_length == 0) {
-            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -269,7 +269,7 @@ pub const HttpServer = struct {
 
         // Проверяем что путь начинается с /
         if (path.len < 2 or path[0] != '/') {
-            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -280,7 +280,7 @@ pub const HttpServer = struct {
         // Парсим хеш из пути (убираем начальный /)
         const hex_hash = path[1..];
         if (hex_hash.len != 64) {
-            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -292,7 +292,7 @@ pub const HttpServer = struct {
         var hash: [32]u8 = undefined;
         for (0..32) |i| {
             hash[i] = std.fmt.parseInt(u8, hex_hash[i * 2 .. i * 2 + 2], 16) catch {
-                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 _ = try posix.send(ctx.conn_fd, response, 0);
                 posix.close(ctx.conn_fd);
                 if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -308,7 +308,7 @@ pub const HttpServer = struct {
 
         // Отправляем HTTP заголовки
         var header_buf: [256]u8 = undefined;
-        const headers = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n", .{block_size}) catch unreachable;
+        const headers = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{block_size}) catch unreachable;
         _ = try posix.send(ctx.conn_fd, headers, 0);
 
         // Создаем pipe для splice
@@ -351,7 +351,7 @@ pub const HttpServer = struct {
 
         if (res < 0) {
             std.debug.print("Read block failed: {d}\n", .{res});
-            const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = posix.send(ctx.conn_fd, response, 0) catch {};
             posix.close(ctx.conn_fd);
             state.cleanup();
@@ -362,7 +362,7 @@ pub const HttpServer = struct {
 
         if (res == 0) {
             std.debug.print("Read block returned 0 bytes unexpectedly\n", .{});
-            const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = posix.send(ctx.conn_fd, response, 0) catch {};
             posix.close(ctx.conn_fd);
             state.cleanup();
@@ -433,7 +433,7 @@ pub const HttpServer = struct {
 
         // Проверяем что путь начинается с /
         if (path.len < 2 or path[0] != '/') {
-            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -444,7 +444,7 @@ pub const HttpServer = struct {
         // Парсим хеш из пути (убираем начальный /)
         const hex_hash = path[1..];
         if (hex_hash.len != 64) {
-            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
             if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -456,7 +456,7 @@ pub const HttpServer = struct {
         var hash: [32]u8 = undefined;
         for (0..32) |i| {
             hash[i] = std.fmt.parseInt(u8, hex_hash[i * 2 .. i * 2 + 2], 16) catch {
-                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 _ = try posix.send(ctx.conn_fd, response, 0);
                 posix.close(ctx.conn_fd);
                 if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -469,7 +469,7 @@ pub const HttpServer = struct {
         _ = self.service.onFreeBlockRequest(hash);
 
         // Отправляем успешный ответ
-        const response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        const response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         _ = try posix.send(ctx.conn_fd, response, 0);
         posix.close(ctx.conn_fd);
 
@@ -497,7 +497,7 @@ pub const HttpServer = struct {
                 // КРИТИЧЕСКАЯ ПРОВЕРКА: если splice вернул 0 байт, данные не прочитались!
                 if (res == 0) {
                     std.debug.print("ERROR: splice(socket->pipe) returned 0 bytes! Socket buffer might be empty or not ready.\n", .{});
-                    const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                    const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     _ = posix.send(ctx.conn_fd, response, 0) catch {};
                     posix.close(ctx.conn_fd);
                     state.cleanup();
@@ -671,7 +671,7 @@ pub const HttpServer = struct {
 
         // Отправляем ответ с хешем
         var response_buf: [256]u8 = undefined;
-        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\n\r\n{s}", .{ hex_hash.len, hex_hash }) catch unreachable;
+        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ hex_hash.len, hex_hash }) catch unreachable;
         _ = try posix.send(ctx.conn_fd, response, 0);
         posix.close(ctx.conn_fd);
 
