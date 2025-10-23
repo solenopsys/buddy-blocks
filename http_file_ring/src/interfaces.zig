@@ -4,11 +4,57 @@ const std = @import("std");
 pub const OpType = enum {
     accept,
     recv_header,
-    splice_to_pipe,
-    tee_pipe,
-    splice_to_file,
-    splice_to_hash,
-    read_hash,
+    pipeline, // общий контекст для всех операций pipeline
+};
+
+/// Какая операция завершилась
+pub const PipelineOp = enum(u8) {
+    splice_socket_to_pipe = 0,
+    tee = 1,
+    splice_to_file = 2,
+    splice_to_hash = 3,
+};
+
+/// Состояние pipeline операций
+pub const PipelineState = struct {
+    // Дескрипторы pipe
+    pipe1_read: i32,
+    pipe1_write: i32,
+    pipe2_read: i32,
+    pipe2_write: i32,
+
+    // Битовая маска завершенных операций (биты 1,2,3 для tee, file, hash)
+    completed_mask: u8 = 0,
+
+    // Ошибка если была
+    has_error: bool = false,
+
+    pub fn init(p1r: i32, p1w: i32, p2r: i32, p2w: i32) PipelineState {
+        return .{
+            .pipe1_read = p1r,
+            .pipe1_write = p1w,
+            .pipe2_read = p2r,
+            .pipe2_write = p2w,
+        };
+    }
+
+    pub fn markComplete(self: *PipelineState, op: PipelineOp) void {
+        const shift: u3 = @intCast(@intFromEnum(op));
+        self.completed_mask |= @as(u8, 1) << shift;
+    }
+
+    pub fn isComplete(self: *PipelineState) bool {
+        // Проверяем что завершились tee (bit 1), file (bit 2), hash (bit 3)
+        return (self.completed_mask & 0b1110) == 0b1110;
+    }
+
+    pub fn cleanup(self: *PipelineState) void {
+        const posix = std.posix;
+        if (self.pipe1_read >= 0) posix.close(self.pipe1_read);
+        if (self.pipe1_write >= 0) posix.close(self.pipe1_write);
+        if (self.pipe2_read >= 0) posix.close(self.pipe2_read);
+        if (self.pipe2_write >= 0) posix.close(self.pipe2_write);
+    }
 };
 
 /// Контекст операции для user_data
@@ -19,6 +65,14 @@ pub const OpContext = struct {
     content_length: u64,
     hash: [32]u8,
     buffer: ?[]u8 = null,
+
+    // Для accept операции
+    addr: std.posix.sockaddr = undefined,
+    addrlen: std.posix.socklen_t = undefined,
+
+    // Для pipeline операций
+    pipeline_state: ?*PipelineState = null,
+    pipeline_op: PipelineOp = .splice_socket_to_pipe,
 };
 
 /// Результат запроса блока
