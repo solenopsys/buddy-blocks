@@ -4,8 +4,6 @@ const WorkerServiceInterface = interfaces.WorkerServiceInterface;
 const BlockInfo = interfaces.BlockInfo;
 
 pub const MockWorkerService = struct {
-    next_block: u64 = 0,
-
     pub fn init() MockWorkerService {
         return MockWorkerService{};
     }
@@ -23,13 +21,11 @@ pub const MockWorkerService = struct {
     }
 
     fn onBlockInputRequest(ptr: *anyopaque, size_index: u8) BlockInfo {
-        const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
+        _ = ptr;
         _ = size_index;
-        const block_num = self.next_block;
-        self.next_block += 1;
 
         return BlockInfo{
-            .block_num = block_num,
+            .block_num = 0,
             .size_index = 0, // всегда 4кб
         };
     }

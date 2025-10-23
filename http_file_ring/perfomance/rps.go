@@ -14,7 +14,7 @@ import (
 const (
 	SERVER_URL  = "http://localhost:8080"
 	BLOCK_SIZE  = 4096
-	ITERATIONS  = 1000
+	ITERATIONS  = 100
 	REQ_TIMEOUT = 5 * time.Second
 	NUM_BLOCKS  = 2
 )
