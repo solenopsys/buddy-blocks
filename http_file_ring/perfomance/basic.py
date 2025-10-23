@@ -2,16 +2,21 @@
 import requests
 import hashlib
 import random
+import sys
 
 SERVER_URL = "http://localhost:8080"
+
+# Получаем размер блока из аргумента или используем 4KB по умолчанию
+# Допустимые размеры: 4KB, 8KB, 16KB, 32KB, 64KB, 128KB, 256KB, 512KB
+BLOCK_SIZE = int(sys.argv[1]) * 1024 if len(sys.argv) > 1 else 4 * 1024
 
 print("="*60)
 print("Тестирование HTTP сервера с io_uring + splice + AF_ALG")
 print("="*60)
 
-# Генерируем 1 случайный блок 4KB
-print("\nГенерация блока данных 4KB...")
-block_data = bytes(random.getrandbits(8) for _ in range(4 * 1024))
+# Генерируем 1 случайный блок
+print(f"\nГенерация блока данных {BLOCK_SIZE // 1024}KB...")
+block_data = bytes(random.getrandbits(8) for _ in range(BLOCK_SIZE))
 
 # Вычисляем ожидаемый хеш
 expected_hash = hashlib.sha256(block_data).hexdigest()

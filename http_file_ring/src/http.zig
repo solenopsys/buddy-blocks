@@ -49,6 +49,7 @@ pub const HttpServer = struct {
             .hash = undefined,
             .addr = undefined,
             .addrlen = @sizeOf(posix.sockaddr),
+            .bytes_transferred = 0,
         };
 
         try self.ring.queueAccept(self.socket, &ctx.addr, &ctx.addrlen, @intFromPtr(ctx));
@@ -96,6 +97,7 @@ pub const HttpServer = struct {
             .content_length = 0,
             .hash = undefined,
             .buffer = buffer,
+            .bytes_transferred = 0,
         };
 
         try self.ring.queueRecv(conn_fd, buffer, @intFromPtr(ctx));
@@ -111,6 +113,7 @@ pub const HttpServer = struct {
             .hash = undefined,
             .addr = undefined,
             .addrlen = @sizeOf(posix.sockaddr),
+            .bytes_transferred = 0,
         };
 
         try self.ring.queueAccept(self.socket, &accept_ctx.addr, &accept_ctx.addrlen, @intFromPtr(accept_ctx));
@@ -172,11 +175,21 @@ pub const HttpServer = struct {
         }
 
         // Запрашиваем блок у сервиса
-        const block_info = self.service.onBlockInputRequest(0);
+        // size_index: 0=4KB, 1=8KB, 2=16KB, 3=32KB, 4=64KB, 5=128KB, 6=256KB, 7=512KB
+        const size_index: u8 = @intCast(@ctz(content_length / 4096));
+        const block_info = self.service.onBlockInputRequest(size_index);
 
         // Создаем pipes для pipeline
         const pipes1 = try posix.pipe();
         const pipes2 = try posix.pipe();
+
+        // Увеличиваем размер pipe буферов до 512KB
+        const F_SETPIPE_SZ: i32 = 1031;
+        const pipe_size: i32 = 524288; // 512 KB
+        _ = linux.fcntl(pipes1[0], F_SETPIPE_SZ, pipe_size);
+        _ = linux.fcntl(pipes1[1], F_SETPIPE_SZ, pipe_size);
+        _ = linux.fcntl(pipes2[0], F_SETPIPE_SZ, pipe_size);
+        _ = linux.fcntl(pipes2[1], F_SETPIPE_SZ, pipe_size);
 
         // Создаем общее состояние pipeline
         const pipeline_state = try self.allocator.create(interfaces.PipelineState);
@@ -204,6 +217,7 @@ pub const HttpServer = struct {
                 .buffer = null,
                 .pipeline_state = pipeline_state,
                 .pipeline_op = .splice_socket_to_pipe,
+                .bytes_transferred = @intCast(body_in_buffer.len),
             };
 
             try self.ring.queueSplice(ctx.conn_fd, -1, pipes1[1], -1, @intCast(remaining_bytes), @intFromPtr(splice_ctx));
@@ -226,15 +240,18 @@ pub const HttpServer = struct {
                 .buffer = null,
                 .pipeline_state = pipeline_state,
                 .pipeline_op = .tee,
+                .bytes_transferred = 0,
             };
 
             const file_ctx = try self.allocator.create(OpContext);
             file_ctx.* = tee_ctx.*;
             file_ctx.pipeline_op = .splice_to_file;
+            file_ctx.bytes_transferred = 0;
 
             const hash_ctx = try self.allocator.create(OpContext);
             hash_ctx.* = tee_ctx.*;
             hash_ctx.pipeline_op = .splice_to_hash;
+            hash_ctx.bytes_transferred = 0;
 
             // Запускаем 3 операции параллельно
             try self.ring.queueTee(pipes1[0], pipes2[1], @intCast(content_length), @intFromPtr(tee_ctx));
@@ -287,7 +304,7 @@ pub const HttpServer = struct {
         // Запрашиваем адрес блока у сервиса
         const block_info = self.service.onBlockAddressRequest(hash);
         const offset = block_info.block_num * 4096;
-        const block_size: u64 = 4096;
+        const block_size: u64 = @as(u64, 4096) << @intCast(block_info.size_index);
 
         // Отправляем HTTP заголовки
         var header_buf: [256]u8 = undefined;
@@ -296,6 +313,12 @@ pub const HttpServer = struct {
 
         // Создаем pipe для splice
         const pipes = try posix.pipe();
+
+        // Увеличиваем размер pipe буферов до 512KB
+        const F_SETPIPE_SZ: i32 = 1031;
+        const pipe_size: i32 = 524288; // 512 KB
+        _ = linux.fcntl(pipes[0], F_SETPIPE_SZ, pipe_size);
+        _ = linux.fcntl(pipes[1], F_SETPIPE_SZ, pipe_size);
 
         // Сохраняем контекст для продолжения
         const read_ctx = try self.allocator.create(OpContext);
@@ -307,6 +330,7 @@ pub const HttpServer = struct {
             .hash = hash,
             .buffer = null,
             .pipeline_state = null,
+            .bytes_transferred = 0,
         };
 
         // Сохраняем информацию о pipe в OpContext используя pipeline_state как указатель
@@ -336,16 +360,36 @@ pub const HttpServer = struct {
             return;
         }
 
-        std.debug.print("handleReadBlock: splice file->pipe completed, {d} bytes (expected {d})\n", .{ res, ctx.content_length });
+        if (res == 0) {
+            std.debug.print("Read block returned 0 bytes unexpectedly\n", .{});
+            const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+            _ = posix.send(ctx.conn_fd, response, 0) catch {};
+            posix.close(ctx.conn_fd);
+            state.cleanup();
+            self.allocator.destroy(state);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        ctx.bytes_transferred += @intCast(res);
+        if (ctx.bytes_transferred < ctx.content_length) {
+            const offset_base = ctx.block_info.block_num * 4096;
+            const next_offset = offset_base + ctx.bytes_transferred;
+            const remaining = ctx.content_length - ctx.bytes_transferred;
+            try self.ring.queueSplice(self.file_storage.fd, @intCast(next_offset), state.pipe1_write, -1, @intCast(remaining), @intFromPtr(ctx));
+            _ = try self.ring.submit();
+            return;
+        }
 
         // Splice из файла в pipe завершен, теперь splice из pipe в socket
-        // Закрываем write конец pipe
-        posix.close(state.pipe1_write);
-        state.pipe1_write = -1; // Помечаем что закрыт
+        if (state.pipe1_write >= 0) {
+            posix.close(state.pipe1_write);
+            state.pipe1_write = -1;
+        }
+        ctx.bytes_transferred = 0;
 
-        // Запускаем splice: pipe -> socket
         try self.ring.queueSplice(state.pipe1_read, -1, ctx.conn_fd, -1, @intCast(ctx.content_length), @intFromPtr(ctx));
-        ctx.op_type = .send_response; // Меняем тип операции
+        ctx.op_type = .send_response;
         _ = try self.ring.submit();
     }
 
@@ -354,9 +398,30 @@ pub const HttpServer = struct {
 
         if (res < 0) {
             std.debug.print("Send response failed: {d}\n", .{res});
+            posix.close(ctx.conn_fd);
+            state.cleanup();
+            self.allocator.destroy(state);
+            self.allocator.destroy(ctx);
+            return;
         }
 
-        // Закрываем соединение и очищаем ресурсы
+        if (res == 0 and ctx.bytes_transferred < ctx.content_length) {
+            std.debug.print("Send response returned 0 bytes before finishing transfer\n", .{});
+            posix.close(ctx.conn_fd);
+            state.cleanup();
+            self.allocator.destroy(state);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        ctx.bytes_transferred += @intCast(res);
+        if (ctx.bytes_transferred < ctx.content_length) {
+            const remaining = ctx.content_length - ctx.bytes_transferred;
+            try self.ring.queueSplice(state.pipe1_read, -1, ctx.conn_fd, -1, @intCast(remaining), @intFromPtr(ctx));
+            _ = try self.ring.submit();
+            return;
+        }
+
         posix.close(ctx.conn_fd);
         state.cleanup();
         self.allocator.destroy(state);
@@ -441,9 +506,21 @@ pub const HttpServer = struct {
                     return;
                 }
 
+                ctx.bytes_transferred += @intCast(res);
+                if (ctx.bytes_transferred < ctx.content_length) {
+                    const remaining = ctx.content_length - ctx.bytes_transferred;
+                    try self.ring.queueSplice(ctx.conn_fd, -1, state.pipe1_write, -1, @intCast(remaining), @intFromPtr(ctx));
+                    _ = try self.ring.submit();
+                    return;
+                }
+
                 // Закрываем write-конец pipe1 - больше не нужен
-                posix.close(state.pipe1_write);
-                state.pipe1_write = -1;
+                if (state.pipe1_write >= 0) {
+                    posix.close(state.pipe1_write);
+                    state.pipe1_write = -1;
+                }
+
+                ctx.bytes_transferred = 0;
 
                 // Запускаем 3 параллельные операции
                 const offset = ctx.block_info.block_num * 4096;
@@ -452,14 +529,17 @@ pub const HttpServer = struct {
                 const tee_ctx = try self.allocator.create(OpContext);
                 tee_ctx.* = ctx.*;
                 tee_ctx.pipeline_op = .tee;
+                tee_ctx.bytes_transferred = 0;
 
                 const file_ctx = try self.allocator.create(OpContext);
                 file_ctx.* = ctx.*;
                 file_ctx.pipeline_op = .splice_to_file;
+                file_ctx.bytes_transferred = 0;
 
                 const hash_ctx = try self.allocator.create(OpContext);
                 hash_ctx.* = ctx.*;
                 hash_ctx.pipeline_op = .splice_to_hash;
+                hash_ctx.bytes_transferred = 0;
 
                 // tee(pipe1→pipe2)
                 try self.ring.queueTee(state.pipe1_read, state.pipe2_write, @intCast(ctx.content_length), @intFromPtr(tee_ctx));
@@ -475,9 +555,28 @@ pub const HttpServer = struct {
             },
 
             .tee => {
-                // Закрываем write-конец pipe2
-                posix.close(state.pipe2_write);
-                state.pipe2_write = -1;
+                if (res == 0) {
+                    std.debug.print("ERROR: tee(pipe1->pipe2) returned 0 bytes\n", .{});
+                    state.has_error = true;
+                    state.cleanup();
+                    posix.close(ctx.conn_fd);
+                    self.allocator.destroy(state);
+                    self.allocator.destroy(ctx);
+                    return;
+                }
+
+                ctx.bytes_transferred += @intCast(res);
+                if (ctx.bytes_transferred < ctx.content_length) {
+                    const remaining = ctx.content_length - ctx.bytes_transferred;
+                    try self.ring.queueTee(state.pipe1_read, state.pipe2_write, @intCast(remaining), @intFromPtr(ctx));
+                    _ = try self.ring.submit();
+                    return;
+                }
+
+                if (state.pipe2_write >= 0) {
+                    posix.close(state.pipe2_write);
+                    state.pipe2_write = -1;
+                }
 
                 state.markComplete(.tee);
                 try self.checkPipelineComplete(state, ctx);
@@ -485,9 +584,30 @@ pub const HttpServer = struct {
             },
 
             .splice_to_file => {
-                // Закрываем read-конец pipe1
-                posix.close(state.pipe1_read);
-                state.pipe1_read = -1;
+                if (res == 0) {
+                    std.debug.print("ERROR: splice(pipe1->file) returned 0 bytes\n", .{});
+                    state.has_error = true;
+                    state.cleanup();
+                    posix.close(ctx.conn_fd);
+                    self.allocator.destroy(state);
+                    self.allocator.destroy(ctx);
+                    return;
+                }
+
+                ctx.bytes_transferred += @intCast(res);
+                if (ctx.bytes_transferred < ctx.content_length) {
+                    const total_written = ctx.bytes_transferred;
+                    const remaining = ctx.content_length - total_written;
+                    const file_offset = ctx.block_info.block_num * 4096 + total_written;
+                    try self.file_storage.queueSplice(state.pipe1_read, file_offset, @intCast(remaining), @intFromPtr(ctx));
+                    _ = try self.ring.submit();
+                    return;
+                }
+
+                if (state.pipe1_read >= 0) {
+                    posix.close(state.pipe1_read);
+                    state.pipe1_read = -1;
+                }
 
                 state.markComplete(.splice_to_file);
                 try self.checkPipelineComplete(state, ctx);
@@ -495,9 +615,28 @@ pub const HttpServer = struct {
             },
 
             .splice_to_hash => {
-                // Закрываем read-конец pipe2
-                posix.close(state.pipe2_read);
-                state.pipe2_read = -1;
+                if (res == 0) {
+                    std.debug.print("ERROR: splice(pipe2->hash) returned 0 bytes\n", .{});
+                    state.has_error = true;
+                    state.cleanup();
+                    posix.close(ctx.conn_fd);
+                    self.allocator.destroy(state);
+                    self.allocator.destroy(ctx);
+                    return;
+                }
+
+                ctx.bytes_transferred += @intCast(res);
+                if (ctx.bytes_transferred < ctx.content_length) {
+                    const remaining = ctx.content_length - ctx.bytes_transferred;
+                    try self.ring.queueSplice(state.pipe2_read, -1, self.hash_socket, -1, @intCast(remaining), @intFromPtr(ctx));
+                    _ = try self.ring.submit();
+                    return;
+                }
+
+                if (state.pipe2_read >= 0) {
+                    posix.close(state.pipe2_read);
+                    state.pipe2_read = -1;
+                }
 
                 state.markComplete(.splice_to_hash);
 

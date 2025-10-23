@@ -8,10 +8,12 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 )
 
-const (
+var (
 	SERVER_URL  = "http://localhost:8080"
 	BLOCK_SIZE  = 4096
 	ITERATIONS  = 100
@@ -20,12 +22,21 @@ const (
 )
 
 func main() {
+	// Получаем размер блока из аргумента или используем 4KB по умолчанию
+	// Допустимые размеры: 4, 8, 16, 32, 64, 128, 256, 512 (KB)
+	if len(os.Args) > 1 {
+		size, err := strconv.Atoi(os.Args[1])
+		if err == nil {
+			BLOCK_SIZE = size * 1024
+		}
+	}
+
 	fmt.Println("============================================================")
 	fmt.Println("Тестирование HTTP сервера - PUT/GET с проверкой данных (Go)")
 	fmt.Println("============================================================")
 
-	// Генерируем 2 блока по 4KB
-	fmt.Printf("\nГенерация %d блоков данных по 4KB...\n", NUM_BLOCKS)
+	// Генерируем 2 блока
+	fmt.Printf("\nГенерация %d блоков данных по %dKB...\n", NUM_BLOCKS, BLOCK_SIZE/1024)
 
 	blocks := make([][]byte, NUM_BLOCKS)
 	hashes := make([]string, NUM_BLOCKS)

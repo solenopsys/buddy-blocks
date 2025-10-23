@@ -67,6 +67,7 @@ pub const OpContext = struct {
     content_length: u64,
     hash: [32]u8,
     buffer: ?[]u8 = null,
+    bytes_transferred: u64 = 0,
 
     // Для accept операции
     addr: std.posix.sockaddr = undefined,
