@@ -32,13 +32,13 @@ client = httpx.Client(
 
 def put_block(index):
     try:
-        response = client.put(f"{SERVER_URL}/block", content=blocks[index])
+        response = client.put(f"{SERVER_URL}/", content=blocks[index])
         if response.status_code == 200:
             returned_hash = response.text.strip()
             if returned_hash == hashes[index]:
                 return (index, True, None)
             else:
-                return (index, False, f"Hash mismatch")
+                return (index, False, f"Hash mismatch: expected {hashes[index]}, got {returned_hash}")
         else:
             return (index, False, f"Status {response.status_code}")
     except Exception as e:
@@ -46,13 +46,14 @@ def put_block(index):
 
 def get_block(index):
     try:
-        response = client.get(f"{SERVER_URL}/block/{hashes[index]}")
+        response = client.get(f"{SERVER_URL}/{hashes[index]}")
         if response.status_code == 200:
             retrieved_data = response.content
             if len(retrieved_data) == BLOCK_SIZE and retrieved_data == blocks[index]:
                 return (index, True, None)
             else:
-                return (index, False, "Data mismatch")
+                actual_hash = hashlib.sha256(retrieved_data).hexdigest() if len(retrieved_data) == BLOCK_SIZE else "size_mismatch"
+                return (index, False, f"Data mismatch: expected {hashes[index]}, got {actual_hash}, size {len(retrieved_data)}")
         else:
             return (index, False, f"Status {response.status_code}")
     except Exception as e:
@@ -60,7 +61,7 @@ def get_block(index):
 
 def delete_block(index):
     try:
-        response = client.delete(f"{SERVER_URL}/block/{hashes[index]}")
+        response = client.delete(f"{SERVER_URL}/{hashes[index]}")
         if response.status_code == 200:
             return (index, True, None)
         else:

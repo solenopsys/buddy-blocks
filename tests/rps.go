@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -13,89 +13,62 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 type config struct {
-	serverURL         string
-	blockSize         int
-	numBlocks         int
-	mode              string
-	concurrency       int
-	warmupConcurrency int
-	duration          time.Duration
-	requestTimeout    time.Duration
-	verify            bool
-	skipPut           bool
-	skipDelete        bool
+	serverURL      string
+	operation      string
+	concurrency    int
+	requestTimeout time.Duration
+	pushedFile     string
+	maxCount       int // Maximum number of objects to push (0 = unlimited)
 }
 
-type stageResult struct {
-	success  uint64
-	failed   uint64
-	bytes    uint64
-	duration time.Duration
-	examples []string
+// Block sizes: 4KB, 8KB, 16KB, 32KB, 64KB, 128KB, 256KB, 512KB
+var blockSizes = []int{
+	4 * 1024,
+	8 * 1024,
+	16 * 1024,
+	32 * 1024,
+	64 * 1024,
+	128 * 1024,
+	256 * 1024,
+	512 * 1024,
+}
+
+type blockRecord struct {
+	hash     string
+	data     []byte
+	sizeIdx  int
 }
 
 func parseFlags() config {
 	cfg := config{}
 	flag.StringVar(&cfg.serverURL, "url", "http://localhost:10001", "Base server URL")
-	flag.IntVar(&cfg.blockSize, "block-size", 4096, "Block size in bytes")
-	flag.IntVar(&cfg.numBlocks, "blocks", 50000, "Number of unique blocks to pre-generate")
-	flag.StringVar(&cfg.mode, "mode", "load", "Mode: load (default) or sequential")
-	flag.IntVar(&cfg.concurrency, "concurrency", 1024, "Number of concurrent workers for the load phase")
-	flag.IntVar(&cfg.warmupConcurrency, "warmup-concurrency", 64, "Workers used for PUT/DELETE warmup phases")
-	flag.DurationVar(&cfg.duration, "duration", 10*time.Second, "Duration of the sustained load phase")
-	flag.DurationVar(&cfg.requestTimeout, "timeout", 5*time.Second, "Per-request timeout")
-	flag.BoolVar(&cfg.verify, "verify", false, "Verify response payloads (slower but safer)")
-	flag.BoolVar(&cfg.skipPut, "skip-put", false, "Skip the PUT warmup phase")
-	flag.BoolVar(&cfg.skipDelete, "skip-delete", true, "Skip the DELETE cleanup phase")
+	flag.StringVar(&cfg.operation, "op", "load", "Operation: load or check")
+	flag.IntVar(&cfg.concurrency, "concurrency", runtime.NumCPU(), "Number of concurrent workers")
+	flag.DurationVar(&cfg.requestTimeout, "timeout", 10*time.Second, "Per-request timeout")
+	flag.StringVar(&cfg.pushedFile, "file", "pushed.txt", "File to store/read hashes")
+	flag.IntVar(&cfg.maxCount, "count", 0, "Maximum number of objects to push (0 = unlimited)")
 	flag.Parse()
 
-	if cfg.blockSize < 32 {
-		fmt.Println("block-size must be >= 32 bytes")
-		os.Exit(1)
-	}
 	if !strings.HasPrefix(cfg.serverURL, "http://") && !strings.HasPrefix(cfg.serverURL, "https://") {
 		cfg.serverURL = "http://" + cfg.serverURL
 	}
-	if !strings.HasSuffix(cfg.serverURL, "/") {
-		cfg.serverURL += "/"
-	}
-	cfg.serverURL = strings.TrimSuffix(cfg.serverURL, "/") // ensure single trailing slash removed
+	cfg.serverURL = strings.TrimSuffix(cfg.serverURL, "/")
 
 	if cfg.concurrency <= 0 {
-		cfg.concurrency = runtime.NumCPU() * 4
-	}
-	if cfg.warmupConcurrency <= 0 {
-		cfg.warmupConcurrency = runtime.NumCPU()
+		cfg.concurrency = runtime.NumCPU()
 	}
 
 	return cfg
-}
-
-func prepareBlocks(cfg config) ([][]byte, []string) {
-	blocks := make([][]byte, cfg.numBlocks)
-	hashes := make([]string, cfg.numBlocks)
-
-	for i := 0; i < cfg.numBlocks; i++ {
-		buf := make([]byte, cfg.blockSize)
-		binary.LittleEndian.PutUint64(buf, uint64(i))
-		fillByte := byte('A' + (i % 26))
-		for j := 8; j < len(buf); j++ {
-			buf[j] = fillByte
-		}
-		sum := sha256.Sum256(buf)
-		blocks[i] = buf
-		hashes[i] = hex.EncodeToString(sum[:])
-	}
-
-	return blocks, hashes
 }
 
 func newHTTPClient(cfg config) *http.Client {
@@ -104,12 +77,12 @@ func newHTTPClient(cfg config) *http.Client {
 		MaxIdleConns:          cfg.concurrency * 4,
 		MaxIdleConnsPerHost:   cfg.concurrency * 2,
 		MaxConnsPerHost:       cfg.concurrency * 2,
-		IdleConnTimeout:       30 * time.Second,
+		IdleConnTimeout:       60 * time.Second,
 		ResponseHeaderTimeout: cfg.requestTimeout,
 		DisableCompression:    true,
 		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
-			KeepAlive: 30 * time.Second,
+			Timeout:   5 * time.Second,
+			KeepAlive: 60 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2: false,
 	}
@@ -119,187 +92,39 @@ func newHTTPClient(cfg config) *http.Client {
 	}
 }
 
-func runSequential(client *http.Client, cfg config, blocks [][]byte, hashes []string) {
-	fmt.Printf("=== Go Sequential Benchmark: %d blocks x %d bytes ===\n", cfg.numBlocks, cfg.blockSize)
+func generateRandomBlock(sizeIdx int, seed int64) blockRecord {
+	size := blockSizes[sizeIdx]
+	data := make([]byte, size)
 
-	putRes := runIndexedPhase("PUT", cfg, client, cfg.numBlocks, 1, func(idx int) error {
-		return doPut(client, cfg, blocks[idx], hashes[idx], true)
-	})
-	printPhase("PUT", putRes, cfg.blockSize)
+	r := rand.New(rand.NewSource(seed))
+	r.Read(data)
 
-	getRes := runIndexedPhase("GET", cfg, client, cfg.numBlocks, 1, func(idx int) error {
-		return doGet(client, cfg, hashes[idx], blocks[idx], true)
-	})
-	printPhase("GET", getRes, cfg.blockSize)
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
 
-	delRes := runIndexedPhase("DELETE", cfg, client, cfg.numBlocks, 1, func(idx int) error {
-		return doDelete(client, cfg, hashes[idx])
-	})
-	printPhase("DELETE", delRes, cfg.blockSize)
-
-	total := putRes.duration + getRes.duration + delRes.duration
-	fmt.Printf("Total time: %.2fs\n", total.Seconds())
-}
-
-func runLoad(client *http.Client, cfg config, blocks [][]byte, hashes []string) {
-	fmt.Printf("=== Go Load Benchmark: %d workers, %d blocks, duration %s ===\n", cfg.concurrency, cfg.numBlocks, cfg.duration)
-
-	if !cfg.skipPut {
-		fmt.Println("Warmup PUT phase...")
-		putRes := runIndexedPhase("PUT", cfg, client, cfg.numBlocks, cfg.warmupConcurrency, func(idx int) error {
-			return doPut(client, cfg, blocks[idx], hashes[idx], cfg.verify)
-		})
-		printPhase("PUT", putRes, cfg.blockSize)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
-	defer cancel()
-
-	var total uint64
-	var success uint64
-	var failed uint64
-	var totalLatency int64
-	start := time.Now()
-
-	var wg sync.WaitGroup
-	wg.Add(cfg.concurrency)
-
-	for i := 0; i < cfg.concurrency; i++ {
-		workerID := i
-		go func() {
-			defer wg.Done()
-			seed := time.Now().UnixNano() + int64(workerID)
-			r := rand.New(rand.NewSource(seed))
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-
-				idx := r.Intn(len(hashes))
-				reqStart := time.Now()
-				err := doGet(client, cfg, hashes[idx], blocks[idx], cfg.verify)
-				elapsed := time.Since(reqStart)
-
-				atomic.AddUint64(&total, 1)
-				atomic.AddInt64(&totalLatency, elapsed.Nanoseconds())
-				if err != nil {
-					atomic.AddUint64(&failed, 1)
-				} else {
-					atomic.AddUint64(&success, 1)
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
-	elapsed := time.Since(start)
-
-	if elapsed <= 0 {
-		elapsed = cfg.duration
-	}
-
-	successRPS := float64(success) / elapsed.Seconds()
-	totalRPS := float64(total) / elapsed.Seconds()
-	fmt.Printf("LOAD GET: total=%d success=%d failed=%d | total rps=%.2f success rps=%.2f | duration %.2fs\n",
-		total, success, failed, totalRPS, successRPS, elapsed.Seconds())
-
-	if success > 0 {
-		avg := time.Duration(atomic.LoadInt64(&totalLatency) / int64(success))
-		fmt.Printf("Average success latency: %s\n", avg)
-	}
-
-	if !cfg.skipDelete {
-		fmt.Println("Cleanup DELETE phase...")
-		delRes := runIndexedPhase("DELETE", cfg, client, cfg.numBlocks, cfg.warmupConcurrency, func(idx int) error {
-			return doDelete(client, cfg, hashes[idx])
-		})
-		printPhase("DELETE", delRes, cfg.blockSize)
+	return blockRecord{
+		hash:    hash,
+		data:    data,
+		sizeIdx: sizeIdx,
 	}
 }
 
-func runIndexedPhase(name string, cfg config, client *http.Client, totalItems int, concurrency int, op func(int) error) stageResult {
-	start := time.Now()
-	var success uint64
-	var failed uint64
-	var examplesMu sync.Mutex
-	examples := make([]string, 0, 5)
-
-	jobs := make(chan int, totalItems)
-	for i := 0; i < totalItems; i++ {
-		jobs <- i
-	}
-	close(jobs)
-
-	var wg sync.WaitGroup
-	workers := concurrency
-	if workers <= 0 {
-		workers = 1
-	}
-
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-			for idx := range jobs {
-				if err := op(idx); err != nil {
-					atomic.AddUint64(&failed, 1)
-					examplesMu.Lock()
-					if len(examples) < 5 {
-						examples = append(examples, err.Error())
-					}
-					examplesMu.Unlock()
-				} else {
-					atomic.AddUint64(&success, 1)
-				}
-			}
-		}()
-	}
-	wg.Wait()
-
-	return stageResult{
-		success:  success,
-		failed:   failed,
-		bytes:    uint64(success) * uint64(cfg.blockSize),
-		duration: time.Since(start),
-		examples: examples,
-	}
-}
-
-func printPhase(name string, res stageResult, blockSize int) {
-	total := res.success + res.failed
-	if res.duration <= 0 {
-		res.duration = time.Nanosecond
-	}
-	rps := float64(res.success) / res.duration.Seconds()
-	throughputMB := (float64(res.success*uint64(blockSize)) / (1024.0 * 1024.0)) / res.duration.Seconds()
-	fmt.Printf("%s: success=%d failed=%d total=%d | %.2f ops/sec (%.2f MB/s) | %.2fs\n",
-		name, res.success, res.failed, total, rps, throughputMB, res.duration.Seconds())
-	if res.failed > 0 && len(res.examples) > 0 {
-		fmt.Println("  sample errors:")
-		for _, e := range res.examples {
-			fmt.Printf("    - %s\n", e)
-		}
-	}
-}
-
-func doPut(client *http.Client, cfg config, payload []byte, expectedHash string, verify bool) error {
-	req, err := http.NewRequest("PUT", cfg.serverURL+"/block", bytes.NewReader(payload))
+func doPut(client *http.Client, cfg config, payload []byte) (string, error) {
+	req, err := http.NewRequest("PUT", cfg.serverURL+"/", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.ContentLength = int64(len(payload))
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -307,27 +132,21 @@ func doPut(client *http.Client, cfg config, payload []byte, expectedHash string,
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		return fmt.Errorf("status %d body %q", resp.StatusCode, snippet)
+		return "", fmt.Errorf("PUT status %d: %s", resp.StatusCode, snippet)
 	}
 
-	if verify {
-		returned := strings.TrimSpace(string(body))
-		if returned != expectedHash {
-			return fmt.Errorf("hash mismatch: got %s expected %s", returned, expectedHash)
-		}
-	}
-	return nil
+	return strings.TrimSpace(string(body)), nil
 }
 
-func doGet(client *http.Client, cfg config, hash string, expected []byte, verify bool) error {
-	req, err := http.NewRequest("GET", cfg.serverURL+"/block/"+hash, nil)
+func doGet(client *http.Client, cfg config, hash string) ([]byte, error) {
+	req, err := http.NewRequest("GET", cfg.serverURL+"/"+hash, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -337,65 +156,319 @@ func doGet(client *http.Client, cfg config, hash string, expected []byte, verify
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		return fmt.Errorf("status %d body %q", resp.StatusCode, snippet)
+		return nil, fmt.Errorf("GET status %d: %s", resp.StatusCode, snippet)
 	}
 
-	if !verify {
-		_, err = io.Copy(io.Discard, resp.Body)
-		return err
-	}
-
-	buf := make([]byte, cfg.blockSize)
-	n, err := io.ReadFull(resp.Body, buf)
-	if err != nil {
-		return err
-	}
-	if n != len(expected) {
-		return fmt.Errorf("length mismatch: got %d want %d", n, len(expected))
-	}
-	if !bytes.Equal(buf[:n], expected) {
-		return fmt.Errorf("payload mismatch")
-	}
-	return nil
+	return io.ReadAll(resp.Body)
 }
 
-func doDelete(client *http.Client, cfg config, hash string) error {
-	req, err := http.NewRequest("DELETE", cfg.serverURL+"/block/"+hash, nil)
-	if err != nil {
-		return err
+func runLoad(client *http.Client, cfg config) {
+	fmt.Printf("=== LOAD Mode ===\n")
+	fmt.Printf("Server: %s\n", cfg.serverURL)
+	fmt.Printf("Concurrency: %d\n", cfg.concurrency)
+	fmt.Printf("Output file: %s\n", cfg.pushedFile)
+	fmt.Printf("Block sizes: 4KB-512KB (8 sizes)\n")
+	if cfg.maxCount > 0 {
+		fmt.Printf("Max objects: %d\n", cfg.maxCount)
+	} else {
+		fmt.Printf("Press Ctrl+C to stop\n")
 	}
+	fmt.Println()
 
-	resp, err := client.Do(req)
+	// Open file for appending hashes
+	file, err := os.OpenFile(cfg.pushedFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return err
+		fmt.Printf("Error opening file: %v\n", err)
+		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer file.Close()
 
-	io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		buf, _ := io.ReadAll(resp.Body)
-		snippet := strings.TrimSpace(string(buf))
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
+	var fileMu sync.Mutex
+
+	// Setup signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\n\nReceived interrupt signal, stopping...")
+		cancel()
+	}()
+
+	var totalOps uint64
+	var successOps uint64
+	var failedOps uint64
+	var totalBytes uint64
+
+	start := time.Now()
+
+	// Stats printer
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				elapsed := time.Since(start).Seconds()
+				total := atomic.LoadUint64(&totalOps)
+				success := atomic.LoadUint64(&successOps)
+				failed := atomic.LoadUint64(&failedOps)
+				bytes := atomic.LoadUint64(&totalBytes)
+
+				rps := float64(total) / elapsed
+				mbps := (float64(bytes) / (1024 * 1024)) / elapsed
+
+				fmt.Printf("[%.0fs] Total: %d | Success: %d | Failed: %d | %.2f ops/s | %.2f MB/s\n",
+					elapsed, total, success, failed, rps, mbps)
+			}
 		}
-		return fmt.Errorf("status %d body %q", resp.StatusCode, snippet)
+	}()
+
+	// Workers
+	var wg sync.WaitGroup
+	wg.Add(cfg.concurrency)
+
+	for i := 0; i < cfg.concurrency; i++ {
+		workerID := i
+		go func() {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				// Check if we've reached maxCount
+				if cfg.maxCount > 0 && atomic.LoadUint64(&successOps) >= uint64(cfg.maxCount) {
+					return
+				}
+
+				// Random size index (0-7)
+				sizeIdx := r.Intn(len(blockSizes))
+				seed := time.Now().UnixNano() + int64(workerID)*1000000 + int64(atomic.LoadUint64(&totalOps))
+
+				block := generateRandomBlock(sizeIdx, seed)
+
+				returnedHash, err := doPut(client, cfg, block.data)
+				atomic.AddUint64(&totalOps, 1)
+
+				if err != nil {
+					atomic.AddUint64(&failedOps, 1)
+					fmt.Printf("PUT failed: %v\n", err)
+					fmt.Printf("\n✗ LOAD FAILED - stopping on first error\n")
+					os.Exit(1)
+				}
+
+				// Verify hash matches
+				if returnedHash != block.hash {
+					atomic.AddUint64(&failedOps, 1)
+					fmt.Printf("Hash mismatch! Expected: %s, Got: %s\n", block.hash, returnedHash)
+					fmt.Printf("\n✗ LOAD FAILED - stopping on first error\n")
+					os.Exit(1)
+				}
+
+				atomic.AddUint64(&successOps, 1)
+				atomic.AddUint64(&totalBytes, uint64(len(block.data)))
+
+				// Write to file
+				fileMu.Lock()
+				fmt.Fprintf(file, "%s %d\n", block.hash, sizeIdx)
+				fileMu.Unlock()
+
+				// Stop after reaching maxCount
+				if cfg.maxCount > 0 && atomic.LoadUint64(&successOps) >= uint64(cfg.maxCount) {
+					cancel() // Signal other workers to stop
+					return
+				}
+			}
+		}()
 	}
-	return nil
+
+	wg.Wait()
+
+	elapsed := time.Since(start)
+	total := atomic.LoadUint64(&totalOps)
+	success := atomic.LoadUint64(&successOps)
+	failed := atomic.LoadUint64(&failedOps)
+	bytes := atomic.LoadUint64(&totalBytes)
+
+	fmt.Printf("\n=== LOAD Complete ===\n")
+	fmt.Printf("Duration: %.2fs\n", elapsed.Seconds())
+	fmt.Printf("Total ops: %d\n", total)
+	fmt.Printf("Success: %d\n", success)
+	fmt.Printf("Failed: %d\n", failed)
+	fmt.Printf("Total data: %.2f MB\n", float64(bytes)/(1024*1024))
+	fmt.Printf("Average: %.2f ops/s | %.2f MB/s\n",
+		float64(total)/elapsed.Seconds(),
+		(float64(bytes)/(1024*1024))/elapsed.Seconds())
+}
+
+func runCheck(client *http.Client, cfg config) {
+	fmt.Printf("=== CHECK Mode ===\n")
+	fmt.Printf("Server: %s\n", cfg.serverURL)
+	fmt.Printf("Concurrency: %d\n", cfg.concurrency)
+	fmt.Printf("Input file: %s\n\n", cfg.pushedFile)
+
+	// Read all hashes from file
+	file, err := os.Open(cfg.pushedFile)
+	if err != nil {
+		fmt.Printf("Error opening file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	type hashEntry struct {
+		hash    string
+		sizeIdx int
+	}
+
+	var entries []hashEntry
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var hash string
+		var sizeIdx int
+		_, err := fmt.Sscanf(line, "%s %d", &hash, &sizeIdx)
+		if err != nil {
+			continue
+		}
+
+		if sizeIdx < 0 || sizeIdx >= len(blockSizes) {
+			continue
+		}
+
+		entries = append(entries, hashEntry{hash: hash, sizeIdx: sizeIdx})
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading file: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Loaded %d hashes from file\n\n", len(entries))
+
+	if len(entries) == 0 {
+		fmt.Println("No hashes to check")
+		return
+	}
+
+	var totalChecked uint64
+	var successChecked uint64
+	var failedChecked uint64
+	var hashMismatches uint64
+	var totalBytes uint64
+
+	start := time.Now()
+
+	// Work queue
+	jobs := make(chan hashEntry, len(entries))
+	for _, e := range entries {
+		jobs <- e
+	}
+	close(jobs)
+
+	// Workers
+	var wg sync.WaitGroup
+	wg.Add(cfg.concurrency)
+
+	for i := 0; i < cfg.concurrency; i++ {
+		go func() {
+			defer wg.Done()
+
+			for entry := range jobs {
+				data, err := doGet(client, cfg, entry.hash)
+				atomic.AddUint64(&totalChecked, 1)
+
+				if err != nil {
+					atomic.AddUint64(&failedChecked, 1)
+					fmt.Printf("GET failed for %s: %v\n", entry.hash, err)
+					fmt.Printf("\n✗ CHECK FAILED - stopping on first error\n")
+					os.Exit(1)
+				}
+
+				// Verify hash
+				sum := sha256.Sum256(data)
+				computedHash := hex.EncodeToString(sum[:])
+
+				if computedHash != entry.hash {
+					atomic.AddUint64(&hashMismatches, 1)
+					fmt.Printf("HASH MISMATCH! Expected: %s, Got: %s\n", entry.hash, computedHash)
+					fmt.Printf("\n✗ CHECK FAILED - stopping on first error\n")
+					os.Exit(1)
+				}
+
+				// Verify size
+				expectedSize := blockSizes[entry.sizeIdx]
+				if len(data) != expectedSize {
+					atomic.AddUint64(&failedChecked, 1)
+					fmt.Printf("SIZE MISMATCH for %s! Expected: %d, Got: %d\n",
+						entry.hash, expectedSize, len(data))
+					fmt.Printf("\n✗ CHECK FAILED - stopping on first error\n")
+					os.Exit(1)
+				}
+
+				atomic.AddUint64(&successChecked, 1)
+				atomic.AddUint64(&totalBytes, uint64(len(data)))
+
+				// Progress indicator
+				if atomic.LoadUint64(&totalChecked)%1000 == 0 {
+					fmt.Printf("Checked: %d/%d\n", atomic.LoadUint64(&totalChecked), len(entries))
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	elapsed := time.Since(start)
+	total := atomic.LoadUint64(&totalChecked)
+	success := atomic.LoadUint64(&successChecked)
+	failed := atomic.LoadUint64(&failedChecked)
+	mismatches := atomic.LoadUint64(&hashMismatches)
+	bytes := atomic.LoadUint64(&totalBytes)
+
+	fmt.Printf("\n=== CHECK Complete ===\n")
+	fmt.Printf("Duration: %.2fs\n", elapsed.Seconds())
+	fmt.Printf("Total checked: %d\n", total)
+	fmt.Printf("Success: %d\n", success)
+	fmt.Printf("Failed: %d\n", failed)
+	fmt.Printf("Hash mismatches: %d\n", mismatches)
+	fmt.Printf("Total data verified: %.2f MB\n", float64(bytes)/(1024*1024))
+	fmt.Printf("Average: %.2f ops/s | %.2f MB/s\n",
+		float64(total)/elapsed.Seconds(),
+		(float64(bytes)/(1024*1024))/elapsed.Seconds())
+
+	if success == total && mismatches == 0 && failed == 0 {
+		fmt.Printf("\n✓ ALL CHECKS PASSED!\n")
+	} else {
+		fmt.Printf("\n✗ SOME CHECKS FAILED!\n")
+		os.Exit(1)
+	}
 }
 
 func main() {
 	cfg := parseFlags()
-
-	blocks, hashes := prepareBlocks(cfg)
 	client := newHTTPClient(cfg)
 
-	switch cfg.mode {
-	case "sequential":
-		runSequential(client, cfg, blocks, hashes)
+	switch cfg.operation {
 	case "load":
-		runLoad(client, cfg, blocks, hashes)
+		runLoad(client, cfg)
+	case "check":
+		runCheck(client, cfg)
 	default:
-		fmt.Printf("unknown mode %q\n", cfg.mode)
+		fmt.Printf("Unknown operation: %s\n", cfg.operation)
+		fmt.Println("Use -op=load or -op=check")
 		os.Exit(1)
 	}
 }

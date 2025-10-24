@@ -15,7 +15,7 @@ const HttpServer = http_file_ring.HttpServer;
 const WorkerServiceInterface = http_file_ring.WorkerServiceInterface;
 const HttpBlockInfo = http_file_ring.BlockInfo;
 
-const sleep_ns = std.time.ns_per_ms;
+const sleep_ns = 0; // No sleep - busy wait for performance
 
 const ControllerResponse = union(enum) {
     allocate: messages.AllocateResult,
