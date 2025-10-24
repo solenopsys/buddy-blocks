@@ -25,6 +25,22 @@ var (
 )
 
 func main() {
+	if v := os.Getenv("NUM_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			NUM_WORKERS = n
+		}
+	}
+	if v := os.Getenv("ITERATIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ITERATIONS = n
+		}
+	}
+	if v := os.Getenv("NUM_BLOCKS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			NUM_BLOCKS = n
+		}
+	}
+
 	// Получаем размер блока из аргумента или используем 4KB по умолчанию
 	// Допустимые размеры: 4, 8, 16, 32, 64, 128, 256, 512 (KB)
 	if len(os.Args) > 1 {
@@ -64,20 +80,19 @@ func main() {
 	// Атомарные счетчики для статистики
 	var putSuccess, getSuccess, putErrors, getErrors, hashMismatch, dataMismatch int64
 
-	fmt.Printf("\nЗапуск параллельных PUT/GET (%d потоков, %d итераций на поток)...\n", NUM_WORKERS, ITERATIONS/NUM_WORKERS)
+	fmt.Printf("\nФаза 1: Параллельная запись блоков (%d потоков, %d итераций на поток)...\n", NUM_WORKERS, ITERATIONS/NUM_WORKERS)
 
 	startTime := time.Now()
 
 	var wg sync.WaitGroup
 	iterationsPerWorker := ITERATIONS / NUM_WORKERS
 
-	// Запускаем NUM_WORKERS горутин
+	// Фаза 1: Все PUT запросы
 	for w := 0; w < NUM_WORKERS; w++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 
-			// Каждая горутина создает свой HTTP клиент
 			client := &http.Client{
 				Timeout: REQ_TIMEOUT,
 				Transport: &http.Transport{
@@ -132,9 +147,38 @@ func main() {
 				}
 
 				atomic.AddInt64(&putSuccess, 1)
+			}
+		}(w)
+	}
 
-				// GET запрос - читаем тот же блок по полученному хешу
-				getURL := fmt.Sprintf("%s/%s", SERVER_URL, returnedHash)
+	wg.Wait()
+	fmt.Printf("Фаза 1 завершена. PUT успешно: %d, ошибок: %d\n", putSuccess, putErrors+hashMismatch)
+
+	// Фаза 2: Все GET запросы
+	fmt.Printf("\nФаза 2: Параллельное чтение блоков (%d потоков, %d итераций на поток)...\n", NUM_WORKERS, ITERATIONS/NUM_WORKERS)
+
+	for w := 0; w < NUM_WORKERS; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			client := &http.Client{
+				Timeout: REQ_TIMEOUT,
+				Transport: &http.Transport{
+					MaxIdleConnsPerHost: 10,
+					MaxConnsPerHost:     10,
+					IdleConnTimeout:     30 * time.Second,
+					DisableKeepAlives:   false,
+				},
+			}
+
+			for i := 0; i < iterationsPerWorker; i++ {
+				blockIdx := (workerID*iterationsPerWorker + i) % NUM_BLOCKS
+				block := blocks[blockIdx]
+				expectedHash := hashes[blockIdx]
+
+				// GET запрос
+				getURL := fmt.Sprintf("%s/%s", SERVER_URL, expectedHash)
 				getReq, err := http.NewRequest("GET", getURL, nil)
 				if err != nil {
 					fmt.Printf("  ✗ Worker %d: GET ошибка создания запроса (блок %d): %v\n", workerID, blockIdx, err)
@@ -159,7 +203,7 @@ func main() {
 				}
 
 				if getResp.StatusCode != 200 {
-					fmt.Printf("  ✗ Worker %d: GET HTTP ошибка (блок %d): %d\n", workerID, blockIdx, getResp.StatusCode)
+					fmt.Printf("  ✗ Worker %d: GET HTTP ошибка (блок %d): %d, hash: %s\n", workerID, blockIdx, getResp.StatusCode, expectedHash)
 					atomic.AddInt64(&getErrors, 1)
 					continue
 				}
@@ -176,7 +220,6 @@ func main() {
 		}(w)
 	}
 
-	// Ждем завершения всех горутин
 	wg.Wait()
 	elapsed := time.Since(startTime)
 	totalOps := putSuccess + getSuccess
@@ -195,6 +238,6 @@ func main() {
 	fmt.Printf("Всего итераций: %d (ожидалось операций: %d)\n", ITERATIONS, ITERATIONS*2)
 	fmt.Printf("Время выполнения: %.2f секунд\n", elapsed.Seconds())
 	fmt.Printf("Скорость: %.2f операций/сек\n", float64(totalOps)/elapsed.Seconds())
-	fmt.Printf("Пропускная способность: %.2f МБ/сек\n", float64(totalOps*BLOCK_SIZE)/(1024*1024*elapsed.Seconds()))
+	fmt.Printf("Пропускная способность: %.2f МБ/сек\n", (float64(totalOps)*float64(BLOCK_SIZE))/(1024*1024*elapsed.Seconds()))
 	fmt.Println("============================================================")
 }

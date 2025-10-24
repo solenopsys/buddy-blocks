@@ -315,6 +315,7 @@ pub const HttpServer = struct {
 
         // Запрашиваем адрес блока у сервиса
         const block_info = self.service.onBlockAddressRequest(hash) catch {
+            std.debug.print("GET miss for hash {s}\n", .{hex_hash});
             const response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             _ = try posix.send(ctx.conn_fd, response, 0);
             posix.close(ctx.conn_fd);
@@ -322,6 +323,7 @@ pub const HttpServer = struct {
             self.allocator.destroy(ctx);
             return;
         };
+        std.debug.print("GET hit for hash {s} -> block_num {d}\n", .{ hex_hash, block_info.block_num });
         const offset = block_info.block_num * 4096;
         const block_size: u64 = @as(u64, 4096) << @intCast(block_info.size_index);
 
@@ -582,6 +584,7 @@ pub const HttpServer = struct {
             },
 
             .tee => {
+                std.debug.print("TEE completed {d} bytes (res={d})\n", .{ ctx.bytes_transferred, res });
                 if (res == 0) {
                     std.debug.print("ERROR: tee(pipe1->pipe2) returned 0 bytes\n", .{});
                     state.has_error = true;
@@ -615,6 +618,7 @@ pub const HttpServer = struct {
             },
 
             .splice_to_file => {
+                std.debug.print("Splice to file completed chunk {d} bytes (res={d})\n", .{ ctx.bytes_transferred, res });
                 if (res == 0) {
                     std.debug.print("ERROR: splice(pipe1->file) returned 0 bytes\n", .{});
                     state.has_error = true;
@@ -650,6 +654,7 @@ pub const HttpServer = struct {
             },
 
             .splice_to_hash => {
+                std.debug.print("Splice to hash completed chunk {d} bytes (res={d})\n", .{ ctx.bytes_transferred, res });
                 if (res == 0) {
                     std.debug.print("ERROR: splice(pipe2->hash) returned 0 bytes\n", .{});
                     state.has_error = true;
@@ -684,8 +689,8 @@ pub const HttpServer = struct {
                 const len = try posix.recv(state.hash_socket, hash_buffer, 0);
 
                 if (len == 32) {
-                    @memcpy(&ctx.hash, hash_buffer[0..32]);
-                self.service.onHashForBlock(ctx.hash, ctx.block_info);
+                    @memcpy(&state.hash, hash_buffer[0..32]);
+                    state.hash_ready = true;
                 } else {
                     std.debug.print("read_hash failed: expected 32 bytes, got {d}\n", .{len});
                 }
@@ -700,13 +705,22 @@ pub const HttpServer = struct {
 
     fn checkPipelineComplete(self: *HttpServer, state: *interfaces.PipelineState, ctx: *OpContext) !void {
         if (!state.isComplete()) return;
+        if (!state.hash_ready) {
+            std.debug.print("ERROR: pipeline complete but hash not ready\n", .{});
+            return;
+        }
 
         // Все операции завершены!
         // Формируем хеш в hex формате
         var hex_hash: [64]u8 = undefined;
-        for (ctx.hash, 0..) |byte, i| {
+        for (state.hash, 0..) |byte, i| {
             _ = std.fmt.bufPrint(hex_hash[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
         }
+
+        // Сохраняем сопоставление хеша и блока после полной обработки
+        self.service.onHashForBlock(state.hash, ctx.block_info);
+
+        std.debug.print("Responding with hash {s} for block_num {d}\n", .{ hex_hash, ctx.block_info.block_num });
 
         // Отправляем ответ с хешем
         var response_buf: [256]u8 = undefined;

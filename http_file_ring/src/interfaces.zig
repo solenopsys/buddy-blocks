@@ -33,6 +33,10 @@ pub const PipelineState = struct {
     // Hash socket для этого запроса
     hash_socket: i32,
 
+    // Буфер для полученного хеша
+    hash: [32]u8 = undefined,
+    hash_ready: bool = false,
+
     // Битовая маска завершенных операций (биты 1,2,3 для tee, file, hash)
     completed_mask: u8 = 0,
 

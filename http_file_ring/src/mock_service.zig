@@ -7,19 +7,23 @@ const WorkerServiceError = interfaces.WorkerServiceError;
 pub const MockWorkerService = struct {
     allocator: std.mem.Allocator,
     next_block_num: std.atomic.Value(u64),
-    hash_map: std.AutoHashMap([32]u8, BlockInfo),
+    hash_map: std.StringHashMap(BlockInfo),
     mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) MockWorkerService {
         return MockWorkerService{
             .allocator = allocator,
             .next_block_num = std.atomic.Value(u64).init(0),
-            .hash_map = std.AutoHashMap([32]u8, BlockInfo).init(allocator),
+            .hash_map = std.StringHashMap(BlockInfo).init(allocator),
             .mutex = .{},
         };
     }
 
     pub fn deinit(self: *MockWorkerService) void {
+        var it = self.hash_map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(@constCast(entry.key_ptr.*));
+        }
         self.hash_map.deinit();
     }
 
@@ -54,9 +58,22 @@ pub const MockWorkerService = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        self.hash_map.put(hash, block_info) catch |err| {
-            std.debug.print("MockWorkerService: Failed to store hash mapping: {}\n", .{err});
+        var key_buf = hashToHex(hash);
+
+        // Аллоцируем память для ключа (иначе key_buf уничтожится при выходе)
+        const key = self.allocator.alloc(u8, 64) catch |err| {
+            std.debug.print("MockWorkerService: Failed to allocate key: {}\n", .{err});
+            return;
         };
+        @memcpy(key, &key_buf);
+
+        self.hash_map.put(key, block_info) catch |err| {
+            std.debug.print("MockWorkerService: Failed to store hash mapping: {}\n", .{err});
+            self.allocator.free(key);
+            return;
+        };
+
+        std.debug.print("Stored hash {s} -> block_num {d}, size_index {d}, total mapped {d}\n", .{ key, block_info.block_num, block_info.size_index, self.hash_map.count() });
     }
 
     fn onFreeBlockRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {
@@ -65,9 +82,14 @@ pub const MockWorkerService = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        var key_buf = hashToHex(hash);
+        const key = key_buf[0..];
+
         // Удаляем из мапы
-        if (self.hash_map.fetchRemove(hash)) |kv| {
-            return kv.value;
+        if (self.hash_map.fetchRemove(key)) |kv| {
+            const info = kv.value;
+            self.allocator.free(@constCast(kv.key));
+            return info;
         }
 
         return BlockInfo{
@@ -82,11 +104,25 @@ pub const MockWorkerService = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        var key_buf = hashToHex(hash);
+        const key = key_buf[0..];
+
         // Ищем в мапе
-        if (self.hash_map.get(hash)) |block_info| {
+        if (self.hash_map.get(key)) |block_info| {
+            std.debug.print("Lookup hit for hash {s} -> block_num {d}\n", .{ key, block_info.block_num });
             return block_info;
         }
 
+        std.debug.print("Lookup miss for hash {s} (mapped {d})\n", .{ key, self.hash_map.count() });
+
         return error.BlockNotFound;
+    }
+
+    fn hashToHex(hash: [32]u8) [64]u8 {
+        var hex_buf: [64]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_buf[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
+        }
+        return hex_buf;
     }
 };
