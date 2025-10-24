@@ -18,6 +18,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const http_file_ring_dep = b.dependency("http_file_ring", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const spsc_queue = b.dependency("spsc_queue", .{
         .target = target,
         .optimize = optimize,
@@ -30,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "spsc_queue", .module = spsc_queue.module("spsc_queue") },
             .{ .name = "buddy_allocator", .module = buddy_allocator_dep.module("buddy_allocator") },
+            .{ .name = "http_file_ring", .module = http_file_ring_dep.module("http_file_ring") },
         },
     });
 
@@ -49,6 +54,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "xev", .module = libxev.module("xev") },
                 .{ .name = "picozig", .module = picozig.module("picozig") },
                 .{ .name = "buddy_allocator", .module = buddy_allocator_dep.module("buddy_allocator") },
+                .{ .name = "http_file_ring", .module = http_file_ring_dep.module("http_file_ring") },
             },
         }),
     });

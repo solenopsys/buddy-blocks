@@ -8,6 +8,7 @@ const OpContext = interfaces.OpContext;
 const OpType = interfaces.OpType;
 const PipelineOp = interfaces.PipelineOp;
 const WorkerServiceInterface = interfaces.WorkerServiceInterface;
+const WorkerServiceError = interfaces.WorkerServiceError;
 
 const FileStorage = @import("file.zig").FileStorage;
 
@@ -646,7 +647,7 @@ pub const HttpServer = struct {
 
                 if (len == 32) {
                     @memcpy(&ctx.hash, hash_buffer[0..32]);
-                    self.service.onHashForBlock(ctx.hash, ctx.block_info);
+                self.service.onHashForBlock(ctx.hash, ctx.block_info);
                 } else {
                     std.debug.print("read_hash failed: expected 32 bytes, got {d}\n", .{len});
                 }
@@ -691,6 +692,12 @@ fn createSocket(port: u16) !posix.fd_t {
     const yes: i32 = 1;
     posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&yes)) catch |err| {
         std.debug.print("ERROR: Failed to set SO_REUSEADDR: {}\n", .{err});
+        return err;
+    };
+
+    // Set SO_REUSEPORT to allow multiple workers on the same port
+    posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.REUSEPORT, std.mem.asBytes(&yes)) catch |err| {
+        std.debug.print("ERROR: Failed to set SO_REUSEPORT: {}\n", .{err});
         return err;
     };
 

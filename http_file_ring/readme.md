@@ -53,3 +53,6 @@ splice(socket→pipe1)
   - onHashForBlock(hash: [32]u8, block_num: u64, size_index: u8) - передается хеш, номер блока и размер
   - onFreeBlockRequetst(hash: [32]u8 )->{ block_num: u64, size_index: u8} - передается хеш, возвращается номер блока и размер
   - onBlockAddressRequest(hash: [32]u8)-> {block_num: u64, size_index: u8} - передается хеш, возвращается номер блока и размер
+
+
+  zig build -Doptimize=ReleaseFast

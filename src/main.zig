@@ -228,7 +228,8 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
     for (workers, 0..) |*w, i| {
         const worker_id: u8 = @intCast(i);
 
-        w.* = try worker.HttpWorker.init(
+        try worker.HttpWorker.init(
+            w,
             worker_id,
             allocator,
             config.port, // All workers listen on the SAME port (SO_REUSEPORT)
@@ -326,9 +327,9 @@ pub fn main() !void {
     std.debug.print("║  • io_uring for async I/O                    ║\n", .{});
     std.debug.print("╠═══════════════════════════════════════════════╣\n", .{});
     std.debug.print("║ API:                                          ║\n", .{});
-    std.debug.print("║  PUT    /block        - Upload block          ║\n", .{});
-    std.debug.print("║  GET    /block/<hash> - Download block        ║\n", .{});
-    std.debug.print("║  DELETE /block/<hash> - Delete block          ║\n", .{});
+    std.debug.print("║  PUT    /           - Upload block            ║\n", .{});
+    std.debug.print("║  GET    /<hash>     - Download block          ║\n", .{});
+    std.debug.print("║  DELETE /<hash>     - Delete block            ║\n", .{});
     std.debug.print("╠═══════════════════════════════════════════════╣\n", .{});
     std.debug.print("║ Press Ctrl+C to shutdown                      ║\n", .{});
     std.debug.print("╚═══════════════════════════════════════════════╝\n", .{});

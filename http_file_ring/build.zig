@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
 
     // Экспортируем модуль
     const mod = b.addModule("http_file_ring", .{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "picozig", .module = picozig.module("picozig") },

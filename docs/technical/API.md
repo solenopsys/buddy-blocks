@@ -12,12 +12,13 @@ http://localhost:10001
 
 ### Upload Block
 
-**PUT** `/block`
+**PUT** (any path)
 
-Upload a data block and get its SHA256 hash.
+Upload a data block and get its SHA256 hash. Path is ignored.
 
 **Request:**
 - Method: `PUT`
+- Path: Any (commonly `/` or `/upload`)
 - Content-Type: `application/octet-stream` (or any)
 - Body: Binary data (max 512KB)
 
@@ -29,7 +30,7 @@ Upload a data block and get its SHA256 hash.
 **Example (JavaScript):**
 ```javascript
 const data = new Blob(['Hello, World!']);
-const response = await fetch('http://localhost:10001/block', {
+const response = await fetch('http://localhost:10001/', {
   method: 'PUT',
   body: data
 });
@@ -39,7 +40,7 @@ console.log('Block hash:', hash);
 
 **Example (cURL):**
 ```bash
-curl -X PUT --data-binary @file.bin http://localhost:10001/block
+curl -X PUT --data-binary @file.bin http://localhost:10001/
 # Returns: a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
 ```
 
@@ -47,7 +48,7 @@ curl -X PUT --data-binary @file.bin http://localhost:10001/block
 
 ### Download Block
 
-**GET** `/block/{hash}`
+**GET** `/{hash}`
 
 Download a data block by its SHA256 hash.
 
@@ -63,21 +64,21 @@ Download a data block by its SHA256 hash.
 **Example (JavaScript):**
 ```javascript
 const hash = 'a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e';
-const response = await fetch(`http://localhost:10001/block/${hash}`);
+const response = await fetch(`http://localhost:10001/${hash}`);
 const blob = await response.blob();
 console.log('Block size:', blob.size);
 ```
 
 **Example (cURL):**
 ```bash
-curl http://localhost:10001/block/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e -o output.bin
+curl http://localhost:10001/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e -o output.bin
 ```
 
 ---
 
 ### Delete Block
 
-**DELETE** `/block/{hash}`
+**DELETE** `/{hash}`
 
 Delete a data block.
 
@@ -87,22 +88,20 @@ Delete a data block.
 
 **Response:**
 - Status: `200 OK`
-- Content-Type: `text/plain`
-- Body: `Block deleted`
+- Content-Length: 0
 
 **Example (JavaScript):**
 ```javascript
 const hash = 'a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e';
-const response = await fetch(`http://localhost:10001/block/${hash}`, {
+const response = await fetch(`http://localhost:10001/${hash}`, {
   method: 'DELETE'
 });
-const message = await response.text();
-console.log(message); // "Block deleted"
+console.log('Status:', response.status); // 200
 ```
 
 **Example (cURL):**
 ```bash
-curl -X DELETE http://localhost:10001/block/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
+curl -X DELETE http://localhost:10001/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
 ```
 
 ---
@@ -116,7 +115,7 @@ class BlockStorage {
   }
 
   async upload(data) {
-    const response = await fetch(`${this.baseUrl}/block`, {
+    const response = await fetch(`${this.baseUrl}/`, {
       method: 'PUT',
       body: data
     });
@@ -125,17 +124,16 @@ class BlockStorage {
   }
 
   async download(hash) {
-    const response = await fetch(`${this.baseUrl}/block/${hash}`);
+    const response = await fetch(`${this.baseUrl}/${hash}`);
     if (!response.ok) throw new Error(`Download failed: ${response.status}`);
     return await response.blob();
   }
 
   async delete(hash) {
-    const response = await fetch(`${this.baseUrl}/block/${hash}`, {
+    const response = await fetch(`${this.baseUrl}/${hash}`, {
       method: 'DELETE'
     });
     if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
-    return await response.text();
   }
 }
 
