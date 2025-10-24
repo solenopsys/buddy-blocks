@@ -239,7 +239,9 @@ pub const HttpServer = struct {
             posix.close(pipes1[1]); // Закрываем write end
             pipeline_state.pipe1_write = -1; // Помечаем что уже закрыт
 
-            const offset = block_info.block_num * 4096;
+            // Вычисляем offset на основе размера блока
+            const block_size = content_length;
+            const offset = block_info.block_num * block_size;
 
             // Создаем контексты для 3 параллельных операций
             const tee_ctx = try self.allocator.create(OpContext);
@@ -323,9 +325,9 @@ pub const HttpServer = struct {
             self.allocator.destroy(ctx);
             return;
         };
-        std.debug.print("GET hit for hash {s} -> block_num {d}\n", .{ hex_hash, block_info.block_num });
-        const offset = block_info.block_num * 4096;
         const block_size: u64 = @as(u64, 4096) << @intCast(block_info.size_index);
+        const offset = block_info.block_num * block_size;
+        std.debug.print("GET hit for hash {s} -> block_num {d}, offset {d}, size {d}\n", .{ hex_hash, block_info.block_num, offset, block_size });
 
         // Отправляем HTTP заголовки
         var header_buf: [256]u8 = undefined;
@@ -394,7 +396,8 @@ pub const HttpServer = struct {
 
         ctx.bytes_transferred += @intCast(res);
         if (ctx.bytes_transferred < ctx.content_length) {
-            const offset_base = ctx.block_info.block_num * 4096;
+            const block_size = ctx.content_length;
+            const offset_base = ctx.block_info.block_num * block_size;
             const next_offset = offset_base + ctx.bytes_transferred;
             const remaining = ctx.content_length - ctx.bytes_transferred;
             try self.ring.queueSplice(self.file_storage.fd, @intCast(next_offset), state.pipe1_write, -1, @intCast(remaining), @intFromPtr(ctx));
@@ -552,7 +555,8 @@ pub const HttpServer = struct {
                 ctx.bytes_transferred = 0;
 
                 // Запускаем 3 параллельные операции
-                const offset = ctx.block_info.block_num * 4096;
+                const block_size = ctx.content_length;
+                const offset = ctx.block_info.block_num * block_size;
 
                 // Создаем контексты для каждой операции
                 const tee_ctx = try self.allocator.create(OpContext);
@@ -637,7 +641,8 @@ pub const HttpServer = struct {
                 if (ctx.bytes_transferred < ctx.content_length) {
                     const total_written = ctx.bytes_transferred;
                     const remaining = ctx.content_length - total_written;
-                    const file_offset = ctx.block_info.block_num * 4096 + total_written;
+                    const block_size = ctx.content_length;
+                    const file_offset = ctx.block_info.block_num * block_size + total_written;
                     try self.file_storage.queueSplice(state.pipe1_read, file_offset, @intCast(remaining), @intFromPtr(ctx));
                     _ = try self.ring.submit();
                     return;

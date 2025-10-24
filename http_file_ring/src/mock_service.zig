@@ -42,7 +42,6 @@ pub const MockWorkerService = struct {
     fn onBlockInputRequest(ptr: *anyopaque, size_index: u8) BlockInfo {
         const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
 
-        // Атомарно инкрементируем block_num для уникального offset
         const block_num = self.next_block_num.fetchAdd(1, .monotonic);
 
         return BlockInfo{
