@@ -8,8 +8,9 @@ set -e
 # Configuration
 TEST_COUNT=${1:-1000}  # Number of objects to test (default: 100000)
 SERVER_DIR="/home/alexstorm/distrib/4ir/ZIG/buddy-blocks"
-export LD_LIBRARY_PATH="../zig-lmdbx/zig-out/lib"
-DB_PATH="$SERVER_DIR/model/data/fastblock.lmdb"
+export LD_LIBRARY_PATH="/home/alexstorm/distrib/4ir/ZIG/zig-lmdbx/zig-out/lib"
+DB_PATH="/tmp/buddy-blocks.db"
+DATA_FILE="/tmp/fastblock.data"
 PUSHED_FILE="$SERVER_DIR/tests/pushed.txt"
 SERVER_PID_FILE="/tmp/buddy-blocks.pid"
 TEST_LOG="$SERVER_DIR/tests/reliability_test.log"
@@ -41,35 +42,24 @@ log_warning() {
 stop_server() {
     log "Stopping server..."
 
-    # Find and kill the server process
-    SERVER_PID=$(ps aux | grep "buddy-blocks-gnu" | grep -v grep | awk '{print $2}')
-
-    if [ -n "$SERVER_PID" ]; then
-        log "Found server PID: $SERVER_PID"
-        kill $SERVER_PID 2>/dev/null || true
-
-        # Wait for process to die (max 10 seconds)
-        for i in {1..10}; do
-            if ! ps -p $SERVER_PID > /dev/null 2>&1; then
-                log_success "Server stopped"
-                break
-            fi
-            sleep 1
-        done
-
-        # Force kill if still running
-        if ps -p $SERVER_PID > /dev/null 2>&1; then
-            log_warning "Force killing server..."
-            kill -9 $SERVER_PID 2>/dev/null || true
-            sleep 1
-        fi
-    else
-        log_warning "Server process not found"
-    fi
+    # Kill all buddy-blocks-gnu processes immediately with SIGKILL
+    pkill -9 -f "buddy-blocks-gnu" 2>/dev/null || true
 
     # Also kill any zig build processes
-    pkill -f "zig build run" 2>/dev/null || true
+    pkill -9 -f "zig build run" 2>/dev/null || true
+
+    # Wait a moment for cleanup
     sleep 1
+
+    # Verify all processes are killed
+    REMAINING=$(pgrep -f "buddy-blocks-gnu" 2>/dev/null || true)
+    if [ -n "$REMAINING" ]; then
+        log_warning "Some processes still running, force killing: $REMAINING"
+        kill -9 $REMAINING 2>/dev/null || true
+        sleep 1
+    fi
+
+    log_success "Server stopped (SIGKILL)"
 }
 
 # Function to start the server
@@ -78,8 +68,11 @@ start_server() {
 
     cd "$SERVER_DIR"
 
-    # Start server binary directly
-    nohup ./zig-out/bin/buddy-blocks-gnu > /dev/null 2>&1 &
+    # Start server binary directly with proper library path
+    nohup env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" ./zig-out/bin/buddy-blocks-gnu > /tmp/buddy-blocks-server.log 2>&1 &
+
+    SERVER_START_PID=$!
+    log "Server started with PID: $SERVER_START_PID"
 
     # Wait for server to be ready
     log "Waiting for server to start..."
@@ -89,22 +82,39 @@ start_server() {
             sleep 1  # Extra second for stability
             return 0
         fi
+
+        # Check if process is still alive
+        if ! kill -0 $SERVER_START_PID 2>/dev/null; then
+            log_error "Server process died during startup"
+            log_error "Last 20 lines of server log:"
+            tail -20 /tmp/buddy-blocks-server.log | tee -a "$TEST_LOG"
+            return 1
+        fi
+
         sleep 1
     done
 
     log_error "Server failed to start within 30 seconds"
+    log_error "Last 20 lines of server log:"
+    tail -20 /tmp/buddy-blocks-server.log | tee -a "$TEST_LOG"
     return 1
 }
 
-# Cleanup function
-cleanup() {
-    log "Cleaning up..."
+# Cleanup function for initial test setup
+cleanup_initial() {
+    log "Cleaning up for fresh test..."
     stop_server
 
-    # Remove database
+    # Remove database for clean test
     if [ -d "$DB_PATH" ]; then
         rm -rf "$DB_PATH"
         log_success "Database removed"
+    fi
+
+    # Remove data file for clean test
+    if [ -f "$DATA_FILE" ]; then
+        rm -f "$DATA_FILE"
+        log_success "Data file removed"
     fi
 
     # Remove pushed.txt
@@ -123,7 +133,7 @@ run_test() {
 
     # Step 1: Cleanup
     log "\n=== Step 1: Initial cleanup ==="
-    cleanup
+    cleanup_initial
 
     # Step 2: Start server
     log "\n=== Step 2: Starting server ==="
