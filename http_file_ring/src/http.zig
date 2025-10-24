@@ -11,6 +11,7 @@ const WorkerServiceInterface = interfaces.WorkerServiceInterface;
 const WorkerServiceError = interfaces.WorkerServiceError;
 
 const FileStorage = @import("file.zig").FileStorage;
+const HashSocketPool = @import("hash_socket_pool.zig").HashSocketPool;
 
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
@@ -18,11 +19,10 @@ pub const HttpServer = struct {
     socket: posix.fd_t,
     service: WorkerServiceInterface,
     file_storage: *FileStorage,
-    hash_socket: posix.fd_t,
+    hash_pool: HashSocketPool,
 
     pub fn init(allocator: std.mem.Allocator, ring: *Ring, port: u16, service: WorkerServiceInterface, file_storage: *FileStorage) !HttpServer {
         const socket = try createSocket(port);
-        const hash_socket = try createHashSocket();
 
         return HttpServer{
             .allocator = allocator,
@@ -30,13 +30,13 @@ pub const HttpServer = struct {
             .socket = socket,
             .service = service,
             .file_storage = file_storage,
-            .hash_socket = hash_socket,
+            .hash_pool = HashSocketPool.init(allocator),
         };
     }
 
     pub fn deinit(self: *HttpServer) void {
         posix.close(self.socket);
-        posix.close(self.hash_socket);
+        self.hash_pool.deinit();
     }
 
     pub fn run(self: *HttpServer) !void {
@@ -180,6 +180,17 @@ pub const HttpServer = struct {
         const size_index: u8 = @intCast(@ctz(content_length / 4096));
         const block_info = self.service.onBlockInputRequest(size_index);
 
+        // Получаем hash_socket из пула
+        const hash_socket = self.hash_pool.acquire() catch |err| {
+            std.debug.print("Failed to acquire hash socket: {}\n", .{err});
+            const response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        };
+
         // Создаем pipes для pipeline
         const pipes1 = try posix.pipe();
         const pipes2 = try posix.pipe();
@@ -194,7 +205,7 @@ pub const HttpServer = struct {
 
         // Создаем общее состояние pipeline
         const pipeline_state = try self.allocator.create(interfaces.PipelineState);
-        pipeline_state.* = interfaces.PipelineState.init(pipes1[0], pipes1[1], pipes2[0], pipes2[1]);
+        pipeline_state.* = interfaces.PipelineState.init(pipes1[0], pipes1[1], pipes2[0], pipes2[1], hash_socket);
 
         // Если часть body уже в буфере - записываем её в pipe
         if (body_in_buffer.len > 0) {
@@ -257,7 +268,7 @@ pub const HttpServer = struct {
             // Запускаем 3 операции параллельно
             try self.ring.queueTee(pipes1[0], pipes2[1], @intCast(content_length), @intFromPtr(tee_ctx));
             try self.file_storage.queueSplice(pipes1[0], offset, @intCast(content_length), @intFromPtr(file_ctx));
-            try self.ring.queueSplice(pipes2[0], -1, self.hash_socket, -1, @intCast(content_length), @intFromPtr(hash_ctx));
+            try self.ring.queueSplice(pipes2[0], -1, pipeline_state.hash_socket, -1, @intCast(content_length), @intFromPtr(hash_ctx));
             _ = try self.ring.submit();
         }
 
@@ -343,7 +354,7 @@ pub const HttpServer = struct {
 
         // Сохраняем информацию о pipe в OpContext используя pipeline_state как указатель
         const pipe_state = try self.allocator.create(interfaces.PipelineState);
-        pipe_state.* = interfaces.PipelineState.init(pipes[0], pipes[1], -1, -1);
+        pipe_state.* = interfaces.PipelineState.init(pipes[0], pipes[1], -1, -1, -1);  // hash_socket = -1 для GET
         read_ctx.pipeline_state = pipe_state;
 
         // Запускаем splice: file -> pipe (используем queueSplice из ring напрямую)
@@ -492,6 +503,10 @@ pub const HttpServer = struct {
         if (res < 0) {
             std.debug.print("Pipeline operation {s} failed: {d}\n", .{ @tagName(ctx.pipeline_op), res });
             state.has_error = true;
+            // Возвращаем hash_socket в пул если он был выделен
+            if (state.hash_socket >= 0) {
+                self.hash_pool.release(state.hash_socket);
+            }
             state.cleanup();
             posix.close(ctx.conn_fd);
             self.allocator.destroy(state);
@@ -508,6 +523,10 @@ pub const HttpServer = struct {
                     const response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     _ = posix.send(ctx.conn_fd, response, 0) catch {};
                     posix.close(ctx.conn_fd);
+                    // Возвращаем hash_socket в пул
+                    if (state.hash_socket >= 0) {
+                        self.hash_pool.release(state.hash_socket);
+                    }
                     state.cleanup();
                     self.allocator.destroy(state);
                     self.allocator.destroy(ctx);
@@ -556,7 +575,7 @@ pub const HttpServer = struct {
                 try self.file_storage.queueSplice(state.pipe1_read, offset, @intCast(ctx.content_length), @intFromPtr(file_ctx));
 
                 // splice(pipe2→hash_socket)
-                try self.ring.queueSplice(state.pipe2_read, -1, self.hash_socket, -1, @intCast(ctx.content_length), @intFromPtr(hash_ctx));
+                try self.ring.queueSplice(state.pipe2_read, -1, state.hash_socket, -1, @intCast(ctx.content_length), @intFromPtr(hash_ctx));
 
                 _ = try self.ring.submit();
                 self.allocator.destroy(ctx);
@@ -566,6 +585,10 @@ pub const HttpServer = struct {
                 if (res == 0) {
                     std.debug.print("ERROR: tee(pipe1->pipe2) returned 0 bytes\n", .{});
                     state.has_error = true;
+                    // Возвращаем hash_socket в пул
+                    if (state.hash_socket >= 0) {
+                        self.hash_pool.release(state.hash_socket);
+                    }
                     state.cleanup();
                     posix.close(ctx.conn_fd);
                     self.allocator.destroy(state);
@@ -595,6 +618,10 @@ pub const HttpServer = struct {
                 if (res == 0) {
                     std.debug.print("ERROR: splice(pipe1->file) returned 0 bytes\n", .{});
                     state.has_error = true;
+                    // Возвращаем hash_socket в пул
+                    if (state.hash_socket >= 0) {
+                        self.hash_pool.release(state.hash_socket);
+                    }
                     state.cleanup();
                     posix.close(ctx.conn_fd);
                     self.allocator.destroy(state);
@@ -626,6 +653,10 @@ pub const HttpServer = struct {
                 if (res == 0) {
                     std.debug.print("ERROR: splice(pipe2->hash) returned 0 bytes\n", .{});
                     state.has_error = true;
+                    // Возвращаем hash_socket в пул
+                    if (state.hash_socket >= 0) {
+                        self.hash_pool.release(state.hash_socket);
+                    }
                     state.cleanup();
                     posix.close(ctx.conn_fd);
                     self.allocator.destroy(state);
@@ -636,7 +667,7 @@ pub const HttpServer = struct {
                 ctx.bytes_transferred += @intCast(res);
                 if (ctx.bytes_transferred < ctx.content_length) {
                     const remaining = ctx.content_length - ctx.bytes_transferred;
-                    try self.ring.queueSplice(state.pipe2_read, -1, self.hash_socket, -1, @intCast(remaining), @intFromPtr(ctx));
+                    try self.ring.queueSplice(state.pipe2_read, -1, state.hash_socket, -1, @intCast(remaining), @intFromPtr(ctx));
                     _ = try self.ring.submit();
                     return;
                 }
@@ -650,7 +681,7 @@ pub const HttpServer = struct {
 
                 // Теперь читаем hash из AF_ALG socket
                 const hash_buffer = try self.allocator.alloc(u8, 32);
-                const len = try posix.recv(self.hash_socket, hash_buffer, 0);
+                const len = try posix.recv(state.hash_socket, hash_buffer, 0);
 
                 if (len == 32) {
                     @memcpy(&ctx.hash, hash_buffer[0..32]);
@@ -682,6 +713,9 @@ pub const HttpServer = struct {
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ hex_hash.len, hex_hash }) catch unreachable;
         _ = try posix.send(ctx.conn_fd, response, 0);
         posix.close(ctx.conn_fd);
+
+        // Возвращаем hash_socket в пул
+        self.hash_pool.release(state.hash_socket);
 
         // Cleanup
         state.cleanup();
@@ -721,37 +755,6 @@ fn createSocket(port: u16) !posix.fd_t {
     };
 
     return socket;
-}
-
-fn createHashSocket() !posix.fd_t {
-    const AF_ALG = 38;
-    const sock = try posix.socket(AF_ALG, posix.SOCK.SEQPACKET, 0);
-    errdefer posix.close(sock);
-
-    // struct sockaddr_alg {
-    //   __u16 salg_family;   // 0-1
-    //   __u8  salg_type[14]; // 2-15
-    //   __u32 salg_feat;     // 16-19
-    //   __u32 salg_mask;     // 20-23
-    //   __u8  salg_name[64]; // 24-87
-    // };
-    var addr: [88]u8 = std.mem.zeroes([88]u8);
-    addr[0] = AF_ALG; // sa_family (u16)
-    addr[1] = 0;
-
-    // salg_type = "hash" (offset 2, length 14)
-    @memcpy(addr[2..6], "hash");
-
-    // salg_name = "sha256" (offset 24, length 64)
-    @memcpy(addr[24..30], "sha256");
-
-    try posix.bind(sock, @ptrCast(@alignCast(&addr)), 88);
-
-    // accept для получения operation socket
-    const op_sock = try posix.accept(sock, null, null, 0);
-    posix.close(sock);
-
-    return op_sock;
 }
 
 fn getContentLength(req: *const picozig.HttpRequest) usize {

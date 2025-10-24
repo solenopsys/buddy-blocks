@@ -2,12 +2,25 @@ const std = @import("std");
 const interfaces = @import("interfaces.zig");
 const WorkerServiceInterface = interfaces.WorkerServiceInterface;
 const BlockInfo = interfaces.BlockInfo;
+const WorkerServiceError = interfaces.WorkerServiceError;
 
 pub const MockWorkerService = struct {
-    last_size_index: u8 = 0,
+    allocator: std.mem.Allocator,
+    next_block_num: std.atomic.Value(u64),
+    hash_map: std.AutoHashMap([32]u8, BlockInfo),
+    mutex: std.Thread.Mutex,
 
-    pub fn init() MockWorkerService {
-        return MockWorkerService{};
+    pub fn init(allocator: std.mem.Allocator) MockWorkerService {
+        return MockWorkerService{
+            .allocator = allocator,
+            .next_block_num = std.atomic.Value(u64).init(0),
+            .hash_map = std.AutoHashMap([32]u8, BlockInfo).init(allocator),
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *MockWorkerService) void {
+        self.hash_map.deinit();
     }
 
     pub fn interface(self: *MockWorkerService) WorkerServiceInterface {
@@ -24,23 +37,38 @@ pub const MockWorkerService = struct {
 
     fn onBlockInputRequest(ptr: *anyopaque, size_index: u8) BlockInfo {
         const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
-        self.last_size_index = size_index;
+
+        // Атомарно инкрементируем block_num для уникального offset
+        const block_num = self.next_block_num.fetchAdd(1, .monotonic);
 
         return BlockInfo{
-            .block_num = 0,
+            .block_num = block_num,
             .size_index = size_index,
         };
     }
 
     fn onHashForBlock(ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo) void {
-        _ = ptr;
-        _ = hash;
-        _ = block_info;
+        const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
+
+        // Сохраняем маппинг hash -> block_info
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.hash_map.put(hash, block_info) catch |err| {
+            std.debug.print("MockWorkerService: Failed to store hash mapping: {}\n", .{err});
+        };
     }
 
     fn onFreeBlockRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {
-        _ = ptr;
-        _ = hash;
+        const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Удаляем из мапы
+        if (self.hash_map.fetchRemove(hash)) |kv| {
+            return kv.value;
+        }
 
         return BlockInfo{
             .block_num = 0,
@@ -48,13 +76,17 @@ pub const MockWorkerService = struct {
         };
     }
 
-    fn onBlockAddressRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {
+    fn onBlockAddressRequest(ptr: *anyopaque, hash: [32]u8) WorkerServiceError!BlockInfo {
         const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
-        _ = hash;
 
-        return BlockInfo{
-            .block_num = 0,
-            .size_index = self.last_size_index,
-        };
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Ищем в мапе
+        if (self.hash_map.get(hash)) |block_info| {
+            return block_info;
+        }
+
+        return error.BlockNotFound;
     }
 };

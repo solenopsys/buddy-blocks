@@ -21,7 +21,8 @@ pub fn main() !void {
     };
     defer file_storage.deinit();
 
-    var mock_service = MockWorkerService.init();
+    var mock_service = MockWorkerService.init(allocator);
+    defer mock_service.deinit();
     const service = mock_service.interface();
 
     var server = HttpServer.init(allocator, &ring, 8080, service, &file_storage) catch |err| {

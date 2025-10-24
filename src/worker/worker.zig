@@ -199,11 +199,6 @@ pub const HttpWorker = struct {
             posix.close(self.server.socket);
             self.server.socket = -1;
         }
-
-        if (self.server.hash_socket >= 0) {
-            posix.close(self.server.hash_socket);
-            self.server.hash_socket = -1;
-        }
     }
 
     fn acquireBlock(self: *HttpWorker, size_index: u8) HttpBlockInfo {

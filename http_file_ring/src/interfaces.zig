@@ -30,18 +30,22 @@ pub const PipelineState = struct {
     pipe2_read: i32,
     pipe2_write: i32,
 
+    // Hash socket для этого запроса
+    hash_socket: i32,
+
     // Битовая маска завершенных операций (биты 1,2,3 для tee, file, hash)
     completed_mask: u8 = 0,
 
     // Ошибка если была
     has_error: bool = false,
 
-    pub fn init(p1r: i32, p1w: i32, p2r: i32, p2w: i32) PipelineState {
+    pub fn init(p1r: i32, p1w: i32, p2r: i32, p2w: i32, hash_sock: i32) PipelineState {
         return .{
             .pipe1_read = p1r,
             .pipe1_write = p1w,
             .pipe2_read = p2r,
             .pipe2_write = p2w,
+            .hash_socket = hash_sock,
         };
     }
 
