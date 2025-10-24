@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Подключаем зависимости
-    const libxev = b.dependency("libxev", .{});
     const picozig = b.dependency("picozig", .{});
     const buddy_allocator_dep = b.dependency("buddy_allocator", .{
         .target = target,
@@ -51,7 +50,6 @@ pub fn build(b: *std.Build) void {
 
             .imports = &.{
                 .{ .name = "buddy-blocks", .module = mod },
-                .{ .name = "xev", .module = libxev.module("xev") },
                 .{ .name = "picozig", .module = picozig.module("picozig") },
                 .{ .name = "buddy_allocator", .module = buddy_allocator_dep.module("buddy_allocator") },
                 .{ .name = "http_file_ring", .module = http_file_ring_dep.module("http_file_ring") },
@@ -63,7 +61,7 @@ pub fn build(b: *std.Build) void {
     const lmdbx_lib = if (musl)
         "../zig-lmdbx/zig-out/lib/liblmdbx-x86_64-musl.so"
     else
-        "../zig-lmdbx/zig-out/lib/liblmdbx-x86_64-gnu.so";
+        "../zig-lmdbx/zig-out/lib/liblmdbx.so";
 
     exe.addObjectFile(b.path(lmdbx_lib));
     exe.addIncludePath(b.path("../zig-lmdbx/libs/libmdbx"));

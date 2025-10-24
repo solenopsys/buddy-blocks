@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const lmdbx = @import("lmdbx_wrapper.zig");
+pub const lmdbx = @import("lmdbx");
 pub const types = @import("types.zig");
 
 const BlockSize = types.BlockSize;
@@ -180,12 +180,15 @@ pub const BuddyAllocator = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.db.beginTransaction();
-        errdefer self.db.abortTransaction();
+        const has_txn = self.db.current_txn != null;
+        if (!has_txn) {
+            try self.db.beginTransaction();
+            errdefer self.db.abortTransaction();
+        }
 
         // Get metadata
         const data = try self.db.get(self.allocator, &hash) orelse {
-            self.db.abortTransaction();
+            if (!has_txn) self.db.abortTransaction();
             return BuddyAllocatorError.BlockNotFound;
         };
         defer self.allocator.free(data);
@@ -198,7 +201,9 @@ pub const BuddyAllocator = struct {
         // Free block (with buddy merge)
         try self.freeBlockInternal(metadata);
 
-        try self.db.commitTransaction();
+        if (!has_txn) {
+            try self.db.commitTransaction();
+        }
     }
 
     /// Check if block exists
@@ -216,8 +221,11 @@ pub const BuddyAllocator = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.db.beginTransaction();
-        errdefer self.db.abortTransaction();
+        const has_txn = self.db.current_txn != null;
+        if (!has_txn) {
+            try self.db.beginTransaction();
+            errdefer self.db.abortTransaction();
+        }
 
         // Use existing allocation logic (handles split, extend, etc.)
         const metadata = try self.allocateBlockInternal(block_size);
@@ -231,7 +239,9 @@ pub const BuddyAllocator = struct {
         std.mem.writeInt(u64, &value_buf, metadata.buddy_num, .little);
         try self.db.put(temp_key, &value_buf);
 
-        try self.db.commitTransaction();
+        if (!has_txn) {
+            try self.db.commitTransaction();
+        }
 
         return metadata;
     }
@@ -241,8 +251,11 @@ pub const BuddyAllocator = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.db.beginTransaction();
-        errdefer self.db.abortTransaction();
+        const has_txn = self.db.current_txn != null;
+        if (!has_txn) {
+            try self.db.beginTransaction();
+            errdefer self.db.abortTransaction();
+        }
 
         // Delete from temp: t_{size}_{block_num}
         var temp_key_buf: [64]u8 = undefined;
@@ -253,7 +266,9 @@ pub const BuddyAllocator = struct {
         const encoded = metadata.encode();
         try self.db.put(&hash, &encoded);
 
-        try self.db.commitTransaction();
+        if (!has_txn) {
+            try self.db.commitTransaction();
+        }
     }
 
     /// Recover temp blocks back to free-list (called on startup)

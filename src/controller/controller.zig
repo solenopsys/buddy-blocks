@@ -4,6 +4,7 @@ const interfaces = @import("../messaging/interfaces.zig");
 const IControllerHandler = interfaces.IControllerHandler;
 const IMessageQueue = interfaces.IMessageQueue;
 const PauseRegulator = @import("pause_regulator.zig").PauseRegulator;
+const lmdbx = @import("buddy_allocator").lmdbx;
 
 /// Пара очередей для коммуникации с одним worker'ом
 pub const WorkerQueues = struct {
@@ -16,6 +17,7 @@ pub const BatchController = struct {
     allocator: std.mem.Allocator,
     message_handler: IControllerHandler,
     worker_queues: []WorkerQueues,
+    db: *lmdbx.Database,
 
     // Буферы для батчинга сообщений
     allocate_requests: std.ArrayList(messages.AllocateRequest),
@@ -41,12 +43,14 @@ pub const BatchController = struct {
         message_handler: IControllerHandler,
         worker_queues: []WorkerQueues,
         cycle_interval_ns: i128,
+        db: *lmdbx.Database,
     ) !BatchController {
         _ = cycle_interval_ns;
         return .{
             .allocator = allocator,
             .message_handler = message_handler,
             .worker_queues = worker_queues,
+            .db = db,
             .allocate_requests = .{},
             .occupy_requests = .{},
             .release_requests = .{},
@@ -78,10 +82,17 @@ pub const BatchController = struct {
             // Шаг 1: Собрать все сообщения из входящих очередей
             try self.collectMessages();
 
-            // Шаг 2: Обработать батчи в правильном порядке
+            // Шаг 2: Начать ОДНУ транзакцию на весь батч
+            try self.db.beginTransaction();
+            errdefer self.db.abortTransaction();
+
+            // Шаг 3: Обработать батчи в правильном порядке
             try self.processBatches();
 
-            // Шаг 3: Отправить результаты
+            // Шаг 4: Закоммитить транзакцию
+            try self.db.commitTransaction();
+
+            // Шаг 5: Отправить результаты
             try self.sendResults();
 
             // Обновляем паузу редко (раз в 1000 итераций)

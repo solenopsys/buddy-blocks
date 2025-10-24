@@ -18,8 +18,8 @@ const block_pool = bb.block_pool;
 const Config = struct {
     port: u16 = 10001,
     num_workers: u8 = 4,
-    data_file: []const u8 = "/tmp/fastblock.data",
-    db_path: []const u8 = "/tmp/buddy-blocks.db",
+    data_file: [:0]const u8 = "/tmp/fastblock.data",
+    db_path: [:0]const u8 = "/tmp/buddy-blocks.db",
 
     /// Block pool target sizes for each block size (0-7)
     pool_targets: [8]usize = .{
@@ -136,8 +136,10 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
     std.debug.print("Initializing buddy-blocks system...\n", .{});
     std.debug.print("  Port: {d}\n", .{config.port});
     std.debug.print("  Workers: {d}\n", .{config.num_workers});
-    std.debug.print("  Data file: {s}\n", .{config.data_file});
-    std.debug.print("  DB path: {s}\n", .{config.db_path});
+    const data_file_path = std.mem.sliceTo(config.data_file, 0);
+    const db_path = std.mem.sliceTo(config.db_path, 0);
+    std.debug.print("  Data file: {s}\n", .{data_file_path});
+    std.debug.print("  DB path: {s}\n", .{db_path});
 
     // Initialize LMDBX
     std.debug.print("Opening LMDBX database...\n", .{});
@@ -149,7 +151,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
     std.debug.print("Opening data file...\n", .{});
     const file_controller = try allocator.create(FileController);
     errdefer allocator.destroy(file_controller);
-    file_controller.* = try FileController.init(allocator, config.data_file);
+    file_controller.* = try FileController.init(allocator, data_file_path);
 
     // Get data file FD for workers
     const data_file_fd = file_controller.fd;
@@ -199,6 +201,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
         ctrl_handler.interface(),
         worker_queues,
         config.controller_cycle_ns,
+        db,
     );
 
     // Create block pools for each worker

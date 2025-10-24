@@ -1,6 +1,6 @@
 const std = @import("std");
 const BuddyAllocator = @import("src/buddy_allocator.zig").BuddyAllocator;
-const lmdbx = @import("src/lmdbx_wrapper.zig");
+const lmdbx = @import("lmdbx");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

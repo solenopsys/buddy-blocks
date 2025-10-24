@@ -4,12 +4,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Добавляем zig-lmdbx модуль
+    const lmdbx_module = b.addModule("lmdbx", .{
+        .root_source_file = b.path("../../zig-lmdbx/src/lmdbx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Экспортируем buddy_allocator как модуль
     const buddy_allocator_module = b.addModule("buddy_allocator", .{
         .root_source_file = b.path("src/buddy_allocator.zig"),
         .target = target,
         .optimize = optimize,
     });
+    buddy_allocator_module.addImport("lmdbx", lmdbx_module);
 
     // Добавляем include пути для lmdbx
     buddy_allocator_module.addIncludePath(b.path("../../zig-lmdbx/libs/libmdbx"));
@@ -23,6 +31,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
+    benchmark_exe.root_module.addImport("lmdbx", lmdbx_module);
 
     // Линкуем с liblmdbx.so
     benchmark_exe.addLibraryPath(b.path("../../zig-lmdbx/zig-out/lib"));
@@ -45,6 +54,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    test_exe.root_module.addImport("lmdbx", lmdbx_module);
 
     test_exe.addLibraryPath(b.path("../../zig-lmdbx/zig-out/lib"));
     test_exe.linkSystemLibrary("lmdbx");

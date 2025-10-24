@@ -1,5 +1,5 @@
 const std = @import("std");
-const lmdbx = @import("lmdbx_wrapper.zig");
+const lmdbx = @import("lmdbx");
 const types = @import("types.zig");
 const buddy = @import("buddy_allocator.zig");
 

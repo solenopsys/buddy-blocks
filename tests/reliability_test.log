@@ -1,26 +1,26 @@
-[0;34m[2025-10-24 14:37:18][0m ==========================================
-[0;34m[2025-10-24 14:37:18][0m RELIABILITY TEST STARTED
-[0;34m[2025-10-24 14:37:18][0m Test count: 100000 objects
-[0;34m[2025-10-24 14:37:18][0m ==========================================
-[0;34m[2025-10-24 14:37:18][0m 
+[0;34m[2025-10-24 15:07:58][0m ==========================================
+[0;34m[2025-10-24 15:07:58][0m RELIABILITY TEST STARTED
+[0;34m[2025-10-24 15:07:58][0m Test count: 1000 objects
+[0;34m[2025-10-24 15:07:58][0m ==========================================
+[0;34m[2025-10-24 15:07:58][0m 
 === Step 1: Initial cleanup ===
-[0;34m[2025-10-24 14:37:18][0m Cleaning up for fresh test...
-[0;34m[2025-10-24 14:37:18][0m Stopping server...
-[0;32m[2025-10-24 14:37:19] ✓ Server stopped (SIGKILL)[0m
-[0;32m[2025-10-24 14:37:19] ✓ Database removed[0m
-[0;32m[2025-10-24 14:37:19] ✓ Data file removed[0m
-[0;32m[2025-10-24 14:37:19] ✓ pushed.txt removed[0m
-[0;34m[2025-10-24 14:37:19][0m 
+[0;34m[2025-10-24 15:07:58][0m Cleaning up for fresh test...
+[0;34m[2025-10-24 15:07:58][0m Stopping server...
+[0;32m[2025-10-24 15:07:59] ✓ Server stopped (SIGKILL)[0m
+[0;32m[2025-10-24 15:07:59] ✓ Database removed[0m
+[0;32m[2025-10-24 15:07:59] ✓ Data file removed[0m
+[0;32m[2025-10-24 15:07:59] ✓ pushed.txt removed[0m
+[0;34m[2025-10-24 15:07:59][0m 
 === Step 2: Starting server ===
-[0;34m[2025-10-24 14:37:19][0m Starting server...
-[0;34m[2025-10-24 14:37:19][0m Server started with PID: 390775
-[0;34m[2025-10-24 14:37:19][0m Waiting for server to start...
-[0;32m[2025-10-24 14:37:20] ✓ Server started successfully[0m
-[0;34m[2025-10-24 14:37:21][0m 
+[0;34m[2025-10-24 15:07:59][0m Starting server...
+[0;34m[2025-10-24 15:07:59][0m Server started with PID: 402054
+[0;34m[2025-10-24 15:07:59][0m Waiting for server to start...
+[0;32m[2025-10-24 15:08:00] ✓ Server started successfully[0m
+[0;34m[2025-10-24 15:08:01][0m 
 === Step 3: Loading test data ===
-[0;34m[2025-10-24 14:37:21][0m Pushing 100000 objects...
-[0;31m[2025-10-24 14:37:54] ✗ Data load failed[0m
-[0;34m[2025-10-24 14:37:54][0m Stopping server...
-[0;32m[2025-10-24 14:37:55] ✓ Server stopped (SIGKILL)[0m
-[0;34m[2025-10-24 14:37:55][0m Stopping server...
-[0;32m[2025-10-24 14:37:56] ✓ Server stopped (SIGKILL)[0m
+[0;34m[2025-10-24 15:08:01][0m Pushing 1000 objects...
+[0;31m[2025-10-24 15:08:01] ✗ Data load failed[0m
+[0;34m[2025-10-24 15:08:01][0m Stopping server...
+[0;32m[2025-10-24 15:08:03] ✓ Server stopped (SIGKILL)[0m
+[0;34m[2025-10-24 15:08:03][0m Stopping server...
+[0;32m[2025-10-24 15:08:04] ✓ Server stopped (SIGKILL)[0m
