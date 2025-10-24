@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// Ошибки сервиса worker
+pub const WorkerServiceError = error{
+    BlockNotFound,
+};
+
 /// Тип операции для io_uring
 pub const OpType = enum {
     accept,
@@ -93,7 +98,7 @@ pub const WorkerServiceInterface = struct {
         onBlockInputRequest: *const fn (ptr: *anyopaque, size_index: u8) BlockInfo,
         onHashForBlock: *const fn (ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo) void,
         onFreeBlockRequest: *const fn (ptr: *anyopaque, hash: [32]u8) BlockInfo,
-        onBlockAddressRequest: *const fn (ptr: *anyopaque, hash: [32]u8) BlockInfo,
+        onBlockAddressRequest: *const fn (ptr: *anyopaque, hash: [32]u8) WorkerServiceError!BlockInfo,
     };
 
     pub fn onBlockInputRequest(self: WorkerServiceInterface, size_index: u8) BlockInfo {
@@ -108,7 +113,7 @@ pub const WorkerServiceInterface = struct {
         return self.vtable.onFreeBlockRequest(self.ptr, hash);
     }
 
-    pub fn onBlockAddressRequest(self: WorkerServiceInterface, hash: [32]u8) BlockInfo {
+    pub fn onBlockAddressRequest(self: WorkerServiceInterface, hash: [32]u8) WorkerServiceError!BlockInfo {
         return self.vtable.onBlockAddressRequest(self.ptr, hash);
     }
 };

@@ -83,7 +83,7 @@ const WorkerService = struct {
         return self.worker.freeBlock(hash);
     }
 
-    fn onBlockAddressRequest(ptr: *anyopaque, hash: [32]u8) HttpBlockInfo {
+    fn onBlockAddressRequest(ptr: *anyopaque, hash: [32]u8) http_file_ring.WorkerServiceError!HttpBlockInfo {
         const self: *WorkerService = @ptrCast(@alignCast(ptr));
         return self.worker.lookupBlock(hash);
     }
@@ -216,7 +216,7 @@ pub const HttpWorker = struct {
         };
     }
 
-    fn lookupBlock(self: *HttpWorker, hash: [32]u8) HttpBlockInfo {
+    fn lookupBlock(self: *HttpWorker, hash: [32]u8) http_file_ring.WorkerServiceError!HttpBlockInfo {
         const req_id = self.nextId();
         self.send(.{ .get_address = .{
             .worker_id = self.id,
@@ -231,7 +231,7 @@ pub const HttpWorker = struct {
                 const block_num = if (block_size == 0) res.offset else res.offset / block_size;
                 break :blk .{ .block_num = block_num, .size_index = size_index };
             },
-            .err => @panic("controller get_address error"),
+            .err => error.BlockNotFound,
             else => unreachable,
         };
     }

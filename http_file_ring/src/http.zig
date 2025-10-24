@@ -303,7 +303,14 @@ pub const HttpServer = struct {
         }
 
         // Запрашиваем адрес блока у сервиса
-        const block_info = self.service.onBlockAddressRequest(hash);
+        const block_info = self.service.onBlockAddressRequest(hash) catch {
+            const response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        };
         const offset = block_info.block_num * 4096;
         const block_size: u64 = @as(u64, 4096) << @intCast(block_info.size_index);
 
