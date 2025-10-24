@@ -220,7 +220,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
         }
     }
 
-    // Create workers
+    // Create workers (without starting HTTP servers yet)
     std.debug.print("Creating {d} HTTP workers...\n", .{config.num_workers});
     const workers = try allocator.alloc(worker.HttpWorker, config.num_workers);
     errdefer allocator.free(workers);
@@ -240,7 +240,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
             config.controller_cycle_ns,   // timing interval
         );
 
-        std.debug.print("  Worker {d} on port {d} (SO_REUSEPORT)\n", .{ worker_id, config.port });
+        std.debug.print("  Worker {d} initialized (port will be opened after pool prefill)\n", .{worker_id});
     }
 
     return .{
@@ -262,23 +262,48 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
     };
 }
 
-/// Start all threads
-fn startThreads(sys: *System) !void {
-    std.debug.print("Starting threads...\n", .{});
+/// Prefill worker pools before starting HTTP servers
+fn prefillWorkerPools(sys: *System) !void {
+    std.debug.print("\nPrefilling worker block pools...\n", .{});
 
-    // Start controller thread
+    // Start controller thread first (needed for pool prefilling)
     std.debug.print("  Starting controller thread...\n", .{});
     sys.controller_thread = try Thread.spawn(.{}, runController, .{sys.batch_controller});
 
-    // Start worker threads
-    std.debug.print("  Starting {d} worker threads...\n", .{sys.workers.len});
+    // Give controller time to start
+    std.Thread.sleep(std.time.ns_per_ms * 100);
+
+    // Prefill each worker's pools
+    for (sys.workers) |*w| {
+        try w.prefillPools(sys.config.pool_targets);
+    }
+
+    std.debug.print("Pool prefilling complete\n\n", .{});
+}
+
+/// Start HTTP servers on all workers
+fn startHttpServers(sys: *System) !void {
+    std.debug.print("Starting HTTP servers...\n", .{});
+
+    for (sys.workers, 0..) |*w, i| {
+        try w.startServer();
+        std.debug.print("  Worker {d} listening on port {d} (SO_REUSEPORT)\n", .{ i, sys.config.port });
+    }
+
+    std.debug.print("All HTTP servers started\n\n", .{});
+}
+
+/// Start worker threads
+fn startThreads(sys: *System) !void {
+    std.debug.print("Starting worker threads...\n", .{});
+
     sys.worker_threads = try sys.allocator.alloc(Thread, sys.workers.len);
 
     for (sys.workers, 0..) |*w, i| {
         sys.worker_threads[i] = try Thread.spawn(.{}, runWorker, .{w});
     }
 
-    std.debug.print("All threads started successfully\n", .{});
+    std.debug.print("All worker threads started\n\n", .{});
 }
 
 fn runController(ctrl: *controller.BatchController) !void {
@@ -308,7 +333,13 @@ pub fn main() !void {
     var sys = try initSystem(allocator, config);
     defer sys.deinit();
 
-    // Start all threads
+    // Prefill worker pools (controller thread starts here)
+    try prefillWorkerPools(&sys);
+
+    // Start HTTP servers (opens ports)
+    try startHttpServers(&sys);
+
+    // Start worker threads
     try startThreads(&sys);
 
     // Print banner

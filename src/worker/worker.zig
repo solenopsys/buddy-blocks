@@ -133,7 +133,49 @@ pub const HttpWorker = struct {
         self.storage = .{ .ring = &self.ring, .fd = file_fd };
         self.service = .{ .worker = self };
 
-        self.server = try HttpServer.init(allocator, &self.ring, port, self.service.interface(), &self.storage);
+        // HTTP server will be initialized later in startServer()
+        self.server = undefined;
+    }
+
+    /// Start HTTP server (opens port) - call after prefilling pools
+    pub fn startServer(self: *HttpWorker) !void {
+        self.server = try HttpServer.init(self.allocator, &self.ring, self.port, self.service.interface(), &self.storage);
+    }
+
+    /// Prefill block pools with blocks from controller
+    pub fn prefillPools(self: *HttpWorker, pool_targets: [8]usize) !void {
+        std.debug.print("  Worker {d}: Prefilling block pools...\n", .{self.id});
+
+        for (pool_targets, 0..) |target, size_idx| {
+            if (target == 0) continue;
+
+            var filled: usize = 0;
+            while (filled < target) : (filled += 1) {
+                // Request block from controller
+                const req_id = self.nextId();
+                self.send(.{ .allocate_block = .{
+                    .worker_id = self.id,
+                    .request_id = req_id,
+                    .size = @intCast(size_idx),
+                } });
+
+                const block_info = switch (self.awaitControllerResponse(req_id)) {
+                    .allocate => |res| PoolBlockInfo{ .size = res.size, .block_num = res.block_num },
+                    .err => {
+                        std.debug.print("  Worker {d}: Failed to prefill pool size {d}\n", .{ self.id, size_idx });
+                        break;
+                    },
+                    else => unreachable,
+                };
+
+                // Add to pool
+                if (size_idx < self.block_pools.len) {
+                    self.block_pools[size_idx].release(block_info);
+                }
+            }
+
+            std.debug.print("  Worker {d}: Pool size {d} filled with {d}/{d} blocks\n", .{ self.id, size_idx, filled, target });
+        }
     }
 
     pub fn deinit(self: *HttpWorker) void {
