@@ -44,9 +44,9 @@ var blockSizes = []int{
 }
 
 type blockRecord struct {
-	hash     string
-	data     []byte
-	sizeIdx  int
+	hash    string
+	data    []byte
+	sizeIdx int
 }
 
 func parseFlags() config {
@@ -167,7 +167,7 @@ func runLoad(client *http.Client, cfg config) {
 	fmt.Printf("Server: %s\n", cfg.serverURL)
 	fmt.Printf("Concurrency: %d\n", cfg.concurrency)
 	fmt.Printf("Output file: %s\n", cfg.pushedFile)
-	fmt.Printf("Block sizes: 4KB-512KB (8 sizes)\n")
+	fmt.Printf("Block sizes: 4KB, 8KB (temporary test)\n")
 	if cfg.maxCount > 0 {
 		fmt.Printf("Max objects: %d\n", cfg.maxCount)
 	} else {
@@ -236,7 +236,7 @@ func runLoad(client *http.Client, cfg config) {
 		workerID := i
 		go func() {
 			defer wg.Done()
-			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
+			// r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
 
 			for {
 				select {
@@ -250,8 +250,8 @@ func runLoad(client *http.Client, cfg config) {
 					return
 				}
 
-				// Random size index (0-7)
-				sizeIdx := r.Intn(len(blockSizes))
+				// Temporary: force 512KB blocks
+				sizeIdx := len(blockSizes) - 1
 				seed := time.Now().UnixNano() + int64(workerID)*1000000 + int64(atomic.LoadUint64(&totalOps))
 
 				block := generateRandomBlock(sizeIdx, seed)

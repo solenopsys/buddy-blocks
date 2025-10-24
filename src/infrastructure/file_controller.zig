@@ -39,19 +39,28 @@ pub const FileController = struct {
 
     /// Увеличить размер файла максимально быстро
     pub fn growFile(self: *FileController, new_size: u64) !void {
-        // Выравниваем размер по границам SSD блоков
-        const aligned_size = std.mem.alignForward(u64, new_size, SSD_BLOCK_SIZE);
+        const current_size = try self.getSizeInternal();
+        if (new_size <= current_size) return;
 
-        // Используем fallocate для быстрого выделения места
+        // Выравниваем конечный размер по границам SSD блоков
+        const aligned_size = std.mem.alignForward(u64, new_size, SSD_BLOCK_SIZE);
+        const delta = aligned_size - current_size;
+        if (delta == 0) return;
+
+        // Расширяем только новый участок файла
         const result = linux.fallocate(
             self.fd,
-            0, // mode: FALLOC_FL_KEEP_SIZE не устанавливаем - хотим реальный размер
-            0, // offset
-            @intCast(aligned_size),
+            0, // режим: выделяем реальные блоки
+            @intCast(current_size),
+            @intCast(delta),
         );
 
         if (result != 0) {
-            return error.FailedToGrowFile;
+            const err = std.posix.errno(result);
+            switch (err) {
+                .OPNOTSUPP, .NOSYS, .INVAL => try std.posix.ftruncate(self.fd, @intCast(aligned_size)),
+                else => return error.FailedToGrowFile,
+            }
         }
     }
 

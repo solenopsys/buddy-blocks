@@ -17,7 +17,7 @@ pub const BatchController = struct {
     allocator: std.mem.Allocator,
     message_handler: IControllerHandler,
     worker_queues: []WorkerQueues,
-    db: *lmdbx.Database,
+    db: ?*lmdbx.Database,
 
     // Буферы для батчинга сообщений
     allocate_requests: std.ArrayList(messages.AllocateRequest),
@@ -43,7 +43,7 @@ pub const BatchController = struct {
         message_handler: IControllerHandler,
         worker_queues: []WorkerQueues,
         cycle_interval_ns: i128,
-        db: *lmdbx.Database,
+        db: ?*lmdbx.Database,
     ) !BatchController {
         _ = cycle_interval_ns;
         return .{
@@ -82,15 +82,15 @@ pub const BatchController = struct {
             // Шаг 1: Собрать все сообщения из входящих очередей
             try self.collectMessages();
 
-            // Шаг 2: Начать ОДНУ транзакцию на весь батч
-            try self.db.beginTransaction();
-            errdefer self.db.abortTransaction();
-
-            // Шаг 3: Обработать батчи в правильном порядке
-            try self.processBatches();
-
-            // Шаг 4: Закоммитить транзакцию
-            try self.db.commitTransaction();
+            // Шаг 2-4: Транзакция на весь батч (если база предоставлена)
+            if (self.db) |db| {
+                try db.beginTransaction();
+                errdefer db.abortTransaction();
+                try self.processBatches();
+                try db.commitTransaction();
+            } else {
+                try self.processBatches();
+            }
 
             // Шаг 5: Отправить результаты
             try self.sendResults();
@@ -304,6 +304,7 @@ test "BatchController - initialization and shutdown" {
         handler_iface,
         @constCast(&worker_queues),
         100_000, // 100µs
+        null,
     );
     defer controller.deinit();
 
@@ -332,6 +333,7 @@ test "BatchController - collectMessages разложение по типам" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        null,
     );
     defer controller.deinit();
 
@@ -391,6 +393,7 @@ test "BatchController - processBatches порядок обработки" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        null,
     );
     defer controller.deinit();
 
@@ -438,6 +441,7 @@ test "BatchController - sendResults отправка в правильные о�
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        null,
     );
     defer controller.deinit();
 
@@ -499,6 +503,7 @@ test "BatchController - полный цикл обработки" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        null,
     );
     defer controller.deinit();
 
@@ -539,6 +544,7 @@ test "BatchController - обработка ошибок" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        null,
     );
     defer controller.deinit();
 

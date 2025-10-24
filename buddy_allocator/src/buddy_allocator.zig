@@ -300,7 +300,7 @@ pub const BuddyAllocator = struct {
             const size_end = std.mem.indexOfPos(u8, key_str, size_start, "_") orelse continue;
             const size_str = key_str[size_start..size_end];
 
-            const block_num_str = key_str[size_end + 1..];
+            const block_num_str = key_str[size_end + 1 ..];
             const block_num = std.fmt.parseInt(u64, block_num_str, 10) catch continue;
 
             // Move to free-list: free_{size}_{block_num} = value (buddy_num)
@@ -412,26 +412,26 @@ pub const BuddyAllocator = struct {
     fn createNewMacroBlock(self: *BuddyAllocator) !void {
         const current_size = try self.file_controller.getSize();
 
-        // Always extend file by 1MB (macro block)
-        try self.file_controller.extend(types.MACRO_BLOCK_SIZE);
+        const chunk_size: u64 = types.MACRO_BLOCK_SIZE * 128; // extend by 128 macro blocks at once
+        try self.file_controller.extend(chunk_size);
 
-        // Create 2 free blocks of 512KB
+        // Create free blocks across the entire chunk
         const block_512k_size: u64 = 524288;
+        const blocks_in_chunk = chunk_size / block_512k_size;
         const base_block_num = current_size / block_512k_size;
 
         var key_buf: [64]u8 = undefined;
 
-        // First 512KB block (block_num = base, buddy = base+1)
-        const key1 = try makeFreeListKey(.size_512k, base_block_num, &key_buf);
-        var value_buf1: [8]u8 = undefined;
-        std.mem.writeInt(u64, &value_buf1, base_block_num + 1, .little);
-        try self.db.put(key1, &value_buf1);
+        var idx: u64 = 0;
+        while (idx < blocks_in_chunk) : (idx += 1) {
+            const block_num = base_block_num + idx;
+            const buddy_num = if (block_num % 2 == 0) block_num + 1 else block_num - 1;
 
-        // Second 512KB block (block_num = base+1, buddy = base)
-        const key2 = try makeFreeListKey(.size_512k, base_block_num + 1, &key_buf);
-        var value_buf2: [8]u8 = undefined;
-        std.mem.writeInt(u64, &value_buf2, base_block_num, .little);
-        try self.db.put(key2, &value_buf2);
+            const key = try makeFreeListKey(.size_512k, block_num, &key_buf);
+            var value_buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &value_buf, buddy_num, .little);
+            try self.db.put(key, &value_buf);
+        }
     }
 
     /// Split block into two smaller blocks (buddy split)

@@ -26,11 +26,11 @@ const Config = struct {
         10, // 4KB
         10, // 8KB
         10, // 16KB
-        5,  // 32KB
-        5,  // 64KB
-        3,  // 128KB
-        2,  // 256KB
-        2,  // 512KB
+        5, // 32KB
+        5, // 64KB
+        3, // 128KB
+        2, // 256KB
+        2, // 512KB
     },
 
     /// Controller cycle interval in nanoseconds (20µs)
@@ -239,8 +239,8 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
             data_file_fd,
             pools_interfaces[i],
             worker_queues[i].from_worker, // worker writes here
-            worker_queues[i].to_worker,   // worker reads from here
-            config.controller_cycle_ns,   // timing interval
+            worker_queues[i].to_worker, // worker reads from here
+            config.controller_cycle_ns, // timing interval
         );
 
         std.debug.print("  Worker {d} initialized (port will be opened after pool prefill)\n", .{worker_id});
