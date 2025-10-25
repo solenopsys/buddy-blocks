@@ -30,6 +30,12 @@ Buddy Blocks is a content-addressed block storage server written in Zig. It reli
 - Run comfortably on $10 SBCs (Orange Pi / Raspberry Pi) with 1–2 GB RAM
 - Match the operational profile of professional S3-compatible systems while remaining simple to operate and audit
 
+## Competitors
+
+- **MinIO vs Buddy Blocks** – Buddy Blocks keeps live memory usage around 10 MB per container, whereas MinIO typically needs hundreds of megabytes for similar workloads.
+- **CPU footprint** – the data path stays inside the Linux kernel (`io_uring`, `splice`, `tee`, `AF_ALG`), so CPU utilisation remains minimal even under sustained load, unlike MinIO’s user-space heavy pipeline.
+- **Microcomputer focus** – engineered specifically for $10 single-board computers; running MinIO on the same hardware usually triggers swapping or aggressive throttling, while Buddy Blocks remains responsive.
+
 ## Current performance
 
 Benchmarks (Zig 0.15.1, Linux 6.16.11): laptop 8 core processor
@@ -42,6 +48,15 @@ Benchmarks (Zig 0.15.1, Linux 6.16.11): laptop 8 core processor
 
 
 Currently, there are many bottlenecks and inefficiencies, so after addressing them, performance will increase by 5-10 times.
+
+## Configuration
+
+Buddy Blocks reads a few environment variables at startup so you can tune idle CPU usage without recompiling:
+
+- `BUDDY_CONTROLLER_IDLE_NS` – controller pause (nanoseconds) when the request rate is below 1k RPS. Default: `1_000_000` (1 ms).
+- `BUDDY_WORKER_SLEEP_NS` – sleep/yield duration (nanoseconds) between worker queue polls. Default: `1_000` (1 µs).
+
+Unset variables fall back to the defaults shown above.
 
 
 

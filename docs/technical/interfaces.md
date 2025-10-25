@@ -853,6 +853,8 @@ pub fn createRealSystem(allocator: Allocator) !System {
         message_handler,
         &worker_queues,
         100_000, // 100µs
+        1_000_000, // 1ms idle pause
+        null,
     );
 
     // 5. Worker
@@ -864,6 +866,8 @@ pub fn createRealSystem(allocator: Allocator) !System {
         pools,
         queue1,
         queue2,
+        100_000,
+        1_000,
     );
 
     return System{
@@ -906,6 +910,8 @@ test "Controller with mock handler and queues" {
         message_handler,
         &worker_queues,
         100_000,
+        1_000_000,
+        null,
     );
     defer controller.deinit();
 
@@ -951,6 +957,8 @@ test "Worker with mock pools and queues" {
         pools,
         to_controller_mock.interface(),
         from_controller_mock.interface(),
+        100_000,
+        1_000,
     );
     defer worker.deinit();
 
@@ -1040,6 +1048,8 @@ test "Controller processes allocate batch" {
         mock_handler.interface(),
         &queues,
         100_000,
+        1_000_000,
+        null,
     );
     defer controller.deinit();
 
@@ -1081,6 +1091,8 @@ test "Worker requests refill when pool is low" {
         pools,
         to_controller.interface(),
         from_controller.interface(),
+        100_000,
+        1_000,
     );
     defer worker.deinit();
 

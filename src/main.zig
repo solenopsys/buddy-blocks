@@ -33,12 +33,31 @@ const Config = struct {
         2, // 512KB
     },
 
-    /// Controller cycle interval in nanoseconds (20µs)
-    controller_cycle_ns: i128 = 20_000,
+    /// Controller cycle interval in nanoseconds (100µs)
+    controller_cycle_ns: i128 = 100_000,
 
     /// SPSC queue capacity
     queue_capacity: usize = 4096,
+
+    /// Idle pause for controller when load is low
+    controller_idle_pause_ns: u64 = 1_000_000,
+
+    /// Sleep duration for worker spin loops
+    worker_sleep_ns: u64 = 1_000,
 };
+
+fn envOrDefaultU64(allocator: std.mem.Allocator, name: []const u8, default: u64) u64 {
+    const value = std.process.getEnvVarOwned(allocator, name) catch return default;
+    defer allocator.free(value);
+    return std.fmt.parseInt(u64, value, 10) catch default;
+}
+
+fn loadConfig(allocator: std.mem.Allocator) Config {
+    var cfg = Config{};
+    cfg.controller_idle_pause_ns = envOrDefaultU64(allocator, "BUDDY_CONTROLLER_IDLE_NS", cfg.controller_idle_pause_ns);
+    cfg.worker_sleep_ns = envOrDefaultU64(allocator, "BUDDY_WORKER_SLEEP_NS", cfg.worker_sleep_ns);
+    return cfg;
+}
 
 /// System state
 const System = struct {
@@ -140,6 +159,8 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
     const db_path = std.mem.sliceTo(config.db_path, 0);
     std.debug.print("  Data file: {s}\n", .{data_file_path});
     std.debug.print("  DB path: {s}\n", .{db_path});
+    std.debug.print("  Controller idle pause: {d} ns\n", .{config.controller_idle_pause_ns});
+    std.debug.print("  Worker loop sleep: {d} ns\n", .{config.worker_sleep_ns});
 
     // Initialize LMDBX
     std.debug.print("Opening LMDBX database...\n", .{});
@@ -201,6 +222,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
         ctrl_handler.interface(),
         worker_queues,
         config.controller_cycle_ns,
+        config.controller_idle_pause_ns,
         db,
     );
 
@@ -241,6 +263,7 @@ fn initSystem(allocator: std.mem.Allocator, config: Config) !System {
             worker_queues[i].from_worker, // worker writes here
             worker_queues[i].to_worker, // worker reads from here
             config.controller_cycle_ns, // timing interval
+            config.worker_sleep_ns,
         );
 
         std.debug.print("  Worker {d} initialized (port will be opened after pool prefill)\n", .{worker_id});
@@ -329,8 +352,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Parse config (can be extended to read from args/file)
-    const config = Config{};
+    // Load config from environment (with defaults)
+    const config = loadConfig(allocator);
 
     // Initialize system
     var sys = try initSystem(allocator, config);

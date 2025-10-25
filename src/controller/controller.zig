@@ -43,6 +43,7 @@ pub const BatchController = struct {
         message_handler: IControllerHandler,
         worker_queues: []WorkerQueues,
         cycle_interval_ns: i128,
+        low_rps_pause_ns: u64,
         db: ?*lmdbx.Database,
     ) !BatchController {
         _ = cycle_interval_ns;
@@ -60,7 +61,7 @@ pub const BatchController = struct {
             .release_results = .{},
             .get_address_results = .{},
             .error_results = .{},
-            .pause_regulator = PauseRegulator.init(),
+            .pause_regulator = PauseRegulator.init(low_rps_pause_ns),
             .running = std.atomic.Value(bool).init(true),
         };
     }
@@ -304,6 +305,7 @@ test "BatchController - initialization and shutdown" {
         handler_iface,
         @constCast(&worker_queues),
         100_000, // 100µs
+        1_000_000,
         null,
     );
     defer controller.deinit();
@@ -333,6 +335,7 @@ test "BatchController - collectMessages разложение по типам" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        1_000_000,
         null,
     );
     defer controller.deinit();
@@ -393,6 +396,7 @@ test "BatchController - processBatches порядок обработки" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        1_000_000,
         null,
     );
     defer controller.deinit();
@@ -441,6 +445,7 @@ test "BatchController - sendResults отправка в правильные о�
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        1_000_000,
         null,
     );
     defer controller.deinit();
@@ -503,6 +508,7 @@ test "BatchController - полный цикл обработки" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        1_000_000,
         null,
     );
     defer controller.deinit();
@@ -544,6 +550,7 @@ test "BatchController - обработка ошибок" {
         handler_iface,
         @constCast(&worker_queues),
         100_000,
+        1_000_000,
         null,
     );
     defer controller.deinit();

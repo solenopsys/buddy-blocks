@@ -15,8 +15,6 @@ const HttpServer = http_file_ring.HttpServer;
 const WorkerServiceInterface = http_file_ring.WorkerServiceInterface;
 const HttpBlockInfo = http_file_ring.BlockInfo;
 
-const sleep_ns = 0; // No sleep - busy wait for performance
-
 const ControllerResponse = union(enum) {
     allocate: messages.AllocateResult,
     occupy: messages.OccupyResult,
@@ -99,6 +97,7 @@ pub const HttpWorker = struct {
     next_request_id: u64,
     pending: std.AutoHashMap(u64, ControllerResponse),
     running: std.atomic.Value(bool),
+    sleep_ns: u64,
 
     ring: Ring,
     storage: FileStorage,
@@ -115,6 +114,7 @@ pub const HttpWorker = struct {
         to_controller: IMessageQueue,
         from_controller: IMessageQueue,
         _: i128,
+        sleep_ns: u64,
     ) !void {
         self.id = id;
         self.allocator = allocator;
@@ -126,6 +126,7 @@ pub const HttpWorker = struct {
         self.pending = std.AutoHashMap(u64, ControllerResponse).init(allocator);
         errdefer self.pending.deinit();
         self.running = std.atomic.Value(bool).init(true);
+        self.sleep_ns = sleep_ns;
 
         self.ring = try Ring.init(256);
         errdefer self.ring.deinit();
@@ -276,7 +277,7 @@ pub const HttpWorker = struct {
     fn send(self: *HttpWorker, msg: messages.Message) void {
         while (!self.to_controller.push(msg)) {
             if (!self.running.load(.acquire)) @panic("worker stopping");
-            std.Thread.sleep(sleep_ns);
+            self.pause();
         }
     }
 
@@ -292,7 +293,7 @@ pub const HttpWorker = struct {
                 }
             }
 
-            std.Thread.sleep(sleep_ns);
+            self.pause();
         }
 
         @panic("worker stopped while waiting for controller");
@@ -302,5 +303,13 @@ pub const HttpWorker = struct {
         const id = self.next_request_id;
         self.next_request_id += 1;
         return id;
+    }
+
+    fn pause(self: *const HttpWorker) void {
+        if (self.sleep_ns > 0) {
+            std.Thread.sleep(self.sleep_ns);
+        } else {
+            std.Thread.yield();
+        }
     }
 };

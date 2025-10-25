@@ -8,15 +8,17 @@ pub const PauseRegulator = struct {
     last_rps: usize,
     current_pause_ns: u64, // Текущая пауза в наносекундах
     update_counter: usize, // Счетчик для редких обновлений
+    low_rps_pause_ns: u64,
 
-    pub fn init() PauseRegulator {
+    pub fn init(low_rps_pause_ns: u64) PauseRegulator {
         return .{
             .rpc_counter = 0,
             .last_rpc_counter = 0,
             .last_check_time = std.time.nanoTimestamp(),
             .last_rps = 0,
-            .current_pause_ns = 100_000, // По умолчанию 100µs
+            .current_pause_ns = low_rps_pause_ns,
             .update_counter = 0,
+            .low_rps_pause_ns = low_rps_pause_ns,
         };
     }
 
@@ -49,7 +51,7 @@ pub const PauseRegulator = struct {
                 self.current_pause_ns = if (self.last_rps >= 1_000)
                     0
                 else
-                    100_000; // 100µs
+                    self.low_rps_pause_ns;
             }
         }
     }
@@ -67,13 +69,13 @@ pub const PauseRegulator = struct {
 const testing = std.testing;
 
 test "PauseRegulator - инициализация" {
-    const regulator = PauseRegulator.init();
+    const regulator = PauseRegulator.init(1_000_000);
     try testing.expectEqual(@as(usize, 0), regulator.rpc_counter);
     try testing.expectEqual(@as(usize, 0), regulator.last_rps);
 }
 
 test "PauseRegulator - increment увеличивает счетчик" {
-    var regulator = PauseRegulator.init();
+    var regulator = PauseRegulator.init(1_000_000);
 
     regulator.increment();
     try testing.expectEqual(@as(usize, 1), regulator.rpc_counter);
@@ -88,7 +90,7 @@ test "PauseRegulator - increment увеличивает счетчик" {
 }
 
 test "PauseRegulator - пауза при низком RPS" {
-    var regulator = PauseRegulator.init();
+    var regulator = PauseRegulator.init(1_000_000);
 
     // Низкий RPS - должна быть пауза 1мс
     for (0..100) |_| {
@@ -99,7 +101,7 @@ test "PauseRegulator - пауза при низком RPS" {
 }
 
 test "PauseRegulator - без паузы при высоком RPS" {
-    var regulator = PauseRegulator.init();
+    var regulator = PauseRegulator.init(1_000_000);
 
     // Симулируем высокий RPS
     for (0..15000) |_| {
@@ -118,7 +120,7 @@ test "PauseRegulator - без паузы при высоком RPS" {
 }
 
 test "PauseRegulator - счетчик не сбрасывается" {
-    var regulator = PauseRegulator.init();
+    var regulator = PauseRegulator.init(1_000_000);
 
     for (0..500) |_| {
         regulator.increment();
@@ -135,7 +137,7 @@ test "PauseRegulator - счетчик не сбрасывается" {
 }
 
 test "PauseRegulator - обновление RPS каждую секунду" {
-    var regulator = PauseRegulator.init();
+    var regulator = PauseRegulator.init(1_000_000);
 
     // Добавляем сообщения
     for (0..5000) |_| {
