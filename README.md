@@ -9,10 +9,20 @@ Buddy Blocks is a content-addressed block storage server written in Zig. It reli
 ## Overview
 
 - High-performance HTTP API for PUT/GET/DELETE of 4 KB – 512 Kb blocks
-- `io_uring`-driven workers with lock-free SPSC queues
+- Keeps data in-kernel via Linux primitives (`io_uring`, `splice`, `tee`, `AF_ALG`) to avoid extra copies
 - Single controller thread owns LMDBX metadata transactions
 - Buddy allocator keeps one preallocated data file fragment-free
 - Designed for decentralised networks and resource-constrained nodes
+
+
+
+## Kernel Acceleration Stack
+
+- **`io_uring`** – pairs submission/completion rings so workers submit reads/writes and reap completions without syscalls in the hot path.
+- **`splice`** – moves bytes between file descriptors entirely inside the kernel, which keeps PUT/GET paths zero-copy.
+- **`tee`** – duplicates in-flight data so hashing can happen while the payload streams to disk, no re-read required.
+- **`AF_ALG`** – exposes the kernel crypto API; one socket is created at startup and reused to compute SHA-256 digests with minimal context switches.
+
 
 ## Project Goals
 
@@ -254,40 +264,66 @@ curl http://localhost:10001/block/<hash>
 
 ## API Reference
 
-### PUT `/block`
+- Base URL: `http://localhost:10001`
+- Blocks are content-addressable (hash = SHA-256, 64 lowercase hex chars)
+- Maximum block size: 512 KB
 
-Uploads a block and returns its SHA-256 hash.
+### Upload Block
 
-```bash
-curl -X PUT --data-binary @file.bin http://localhost:10001/block
-echo "Hello, World!" | curl -X PUT --data-binary @- http://localhost:10001/block
-```
+**PUT** to any path (commonly `/`).
 
-Response:
-```
-HTTP/1.1 200 OK
-Content-Type: text/plain
-
-a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
-```
-
-Limits: maximum block size is 1 MB (size-class dependent).
-
-### GET `/block/<hash>`
-
-Fetches a block by its content hash.
+- Request body: binary payload up to 512 KB
+- Response body: text hash of uploaded content
+- Status: `200 OK`
 
 ```bash
-curl http://localhost:10001/block/<hash> -o output.bin
+curl -X PUT --data-binary @file.bin http://localhost:10001/
+echo "Hello, World!" | curl -X PUT --data-binary @- http://localhost:10001/
 ```
 
-### DELETE `/block/<hash>`
+```javascript
+const data = new Blob(['Hello, World!']);
+const response = await fetch('http://localhost:10001/', { method: 'PUT', body: data });
+const hash = await response.text();
+```
 
-Removes a stored block and returns the space to the allocator.
+### Download Block
+
+**GET** `/{hash}`
+
+- Path parameter: SHA-256 hash
+- Response: binary data stream, `200 OK` if found, `404` otherwise
 
 ```bash
-curl -X DELETE http://localhost:10001/block/<hash>
+curl http://localhost:10001/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e -o output.bin
 ```
+
+```javascript
+const response = await fetch(`http://localhost:10001/${hash}`);
+const blob = await response.blob();
+```
+
+### Delete Block
+
+**DELETE** `/{hash}`
+
+- Response status: `200 OK`
+- Empty body
+
+```bash
+curl -X DELETE http://localhost:10001/a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e
+```
+
+```javascript
+await fetch(`http://localhost:10001/${hash}`, { method: 'DELETE' });
+```
+
+### Error Codes
+
+- `400 Bad Request` – empty body or invalid size
+- `404 Not Found` – hash missing
+- `413 Payload Too Large` – payload exceeds 512 KB
+- `500 Internal Server Error` – allocation or internal failure
 
 ## Runtime Configuration
 
