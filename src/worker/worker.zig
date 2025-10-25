@@ -309,7 +309,7 @@ pub const HttpWorker = struct {
         if (self.sleep_ns > 0) {
             std.Thread.sleep(self.sleep_ns);
         } else {
-            std.Thread.yield();
+            std.Thread.yield() catch {};
         }
     }
 };

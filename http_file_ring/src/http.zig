@@ -13,6 +13,9 @@ const WorkerServiceError = interfaces.WorkerServiceError;
 const FileStorage = @import("file.zig").FileStorage;
 const HashSocketPool = @import("hash_socket_pool.zig").HashSocketPool;
 
+const max_header_bytes: usize = 16 * 1024; // cap HTTP header size to 16KB
+const max_block_bytes: usize = 4096 * 128; // 512 KB
+
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
     ring: *Ring,
@@ -87,8 +90,8 @@ pub const HttpServer = struct {
         }
 
         const conn_fd = res;
-        // Буфер 256 байт - достаточно для HTTP заголовков, body останется в socket для splice
-        const buffer = try self.allocator.alloc(u8, 256);
+        // 4KB header buffer keeps typical browser requests in a single read
+        const buffer = try self.allocator.alloc(u8, 4096);
 
         const ctx = try self.allocator.create(OpContext);
         ctx.* = .{
@@ -129,8 +132,13 @@ pub const HttpServer = struct {
             return;
         }
 
+        var total_read: usize = @intCast(ctx.bytes_transferred);
+        total_read += @intCast(bytes_read);
+        ctx.bytes_transferred = total_read;
+
         const buffer = ctx.buffer orelse return error.NoBuffer;
-        const data = buffer[0..@intCast(bytes_read)];
+        if (total_read > buffer.len) return error.BufferOverflow;
+        var data = buffer[0..total_read];
         var headers: [100]picozig.Header = undefined;
         var httpRequest = picozig.HttpRequest{
             .params = undefined,
@@ -139,10 +147,45 @@ pub const HttpServer = struct {
         };
 
         const header_len = picozig.parseRequest(data, &httpRequest);
+        if (header_len == -2) {
+            if (data.len >= max_header_bytes) {
+                std.debug.print("HTTP header exceeded {d} bytes\n", .{max_header_bytes});
+                self.respondWithStatus(ctx, "431 Request Header Fields Too Large");
+                return;
+            }
+
+            var current_buffer = buffer;
+            if (current_buffer.len == data.len) {
+                const new_len = @min(current_buffer.len * 2, max_header_bytes);
+                const new_buffer = try self.allocator.alloc(u8, new_len);
+                @memcpy(new_buffer[0..data.len], data);
+                self.allocator.free(current_buffer);
+                ctx.buffer = new_buffer;
+                current_buffer = new_buffer;
+                data = current_buffer[0..data.len];
+            }
+
+            ctx.bytes_transferred = data.len;
+            const remaining = current_buffer[data.len..];
+            if (remaining.len == 0) {
+                self.respondWithStatus(ctx, "431 Request Header Fields Too Large");
+                return;
+            }
+
+            try self.ring.queueRecv(ctx.conn_fd, remaining, @intFromPtr(ctx));
+            _ = try self.ring.submit();
+            return;
+        } else if (header_len < 0) {
+            const status = "400 Bad Request";
+            std.debug.print("HTTP parse error {d} -> {s}\n", .{ header_len, status });
+            self.respondWithStatus(ctx, status);
+            return;
+        }
 
         // ВАЖНО: body может уже быть в буфере после заголовков!
         const header_len_usize: usize = @intCast(header_len);
-        const body_in_buffer = if (header_len > 0 and header_len_usize < data.len) data[header_len_usize..] else &[_]u8{};
+        const body_in_buffer = if (header_len_usize < data.len) data[header_len_usize..] else &[_]u8{};
+        ctx.bytes_transferred = 0; // reset counter before handing off
 
         // Определяем метод
         const method = httpRequest.params.method;
@@ -164,38 +207,43 @@ pub const HttpServer = struct {
     }
 
     fn handlePut(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest, body_in_buffer: []const u8) !void {
-        // Получаем Content-Length
         const content_length = getContentLength(req);
         if (content_length == 0) {
-            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            _ = try posix.send(ctx.conn_fd, response, 0);
-            posix.close(ctx.conn_fd);
-            if (ctx.buffer) |buf| self.allocator.free(buf);
-            self.allocator.destroy(ctx);
+            self.respondWithStatus(ctx, "411 Length Required");
+            return;
+        }
+        if (content_length < 4096 or (content_length % 4096) != 0) {
+            self.respondWithStatus(ctx, "400 Bad Request");
+            return;
+        }
+        if (content_length > max_block_bytes) {
+            self.respondWithStatus(ctx, "413 Payload Too Large");
             return;
         }
 
-        // Запрашиваем блок у сервиса
-        // size_index: 0=4KB, 1=8KB, 2=16KB, 3=32KB, 4=64KB, 5=128KB, 6=256KB, 7=512KB
-        const size_index: u8 = @intCast(@ctz(content_length / 4096));
+        const ratio = content_length / 4096;
+        if (!std.math.isPowerOfTwo(ratio)) {
+            self.respondWithStatus(ctx, "400 Bad Request");
+            return;
+        }
+
+        const size_index: u8 = @intCast(std.math.log2_int(usize, ratio));
         const block_info = self.service.onBlockInputRequest(size_index);
 
-        // Получаем hash_socket из пула
+        if (body_in_buffer.len > content_length) {
+            self.respondWithStatus(ctx, "400 Bad Request");
+            return;
+        }
+
         const hash_socket = self.hash_pool.acquire() catch |err| {
             std.debug.print("Failed to acquire hash socket: {}\n", .{err});
-            const response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            _ = try posix.send(ctx.conn_fd, response, 0);
-            posix.close(ctx.conn_fd);
-            if (ctx.buffer) |buf| self.allocator.free(buf);
-            self.allocator.destroy(ctx);
+            self.respondWithStatus(ctx, "503 Service Unavailable");
             return;
         };
 
-        // Создаем pipes для pipeline
         const pipes1 = try posix.pipe();
         const pipes2 = try posix.pipe();
 
-        // Увеличиваем размер pipe буферов до 512KB
         const F_SETPIPE_SZ: i32 = 1031;
         const pipe_size: i32 = 524288; // 512 KB
         _ = linux.fcntl(pipes1[0], F_SETPIPE_SZ, pipe_size);
@@ -203,11 +251,9 @@ pub const HttpServer = struct {
         _ = linux.fcntl(pipes2[0], F_SETPIPE_SZ, pipe_size);
         _ = linux.fcntl(pipes2[1], F_SETPIPE_SZ, pipe_size);
 
-        // Создаем общее состояние pipeline
         const pipeline_state = try self.allocator.create(interfaces.PipelineState);
         pipeline_state.* = interfaces.PipelineState.init(pipes1[0], pipes1[1], pipes2[0], pipes2[1], hash_socket);
 
-        // Если часть body уже в буфере - записываем её в pipe
         if (body_in_buffer.len > 0) {
             const written = try posix.write(pipes1[1], body_in_buffer);
             if (written != body_in_buffer.len) {
@@ -216,9 +262,7 @@ pub const HttpServer = struct {
         }
 
         const remaining_bytes = content_length - body_in_buffer.len;
-
         if (remaining_bytes > 0) {
-            // Есть ещё данные в socket - делаем splice
             const splice_ctx = try self.allocator.create(OpContext);
             splice_ctx.* = .{
                 .op_type = .pipeline,
@@ -235,15 +279,12 @@ pub const HttpServer = struct {
             try self.ring.queueSplice(ctx.conn_fd, -1, pipes1[1], -1, @intCast(remaining_bytes), @intFromPtr(splice_ctx));
             _ = try self.ring.submit();
         } else {
-            // Все данные уже в pipe, запускаем pipeline сразу
-            posix.close(pipes1[1]); // Закрываем write end
-            pipeline_state.pipe1_write = -1; // Помечаем что уже закрыт
+            posix.close(pipes1[1]);
+            pipeline_state.pipe1_write = -1;
 
-            // Вычисляем offset на основе размера блока
             const block_size = content_length;
             const offset = block_info.block_num * block_size;
 
-            // Создаем контексты для 3 параллельных операций
             const tee_ctx = try self.allocator.create(OpContext);
             tee_ctx.* = .{
                 .op_type = .pipeline,
@@ -267,7 +308,6 @@ pub const HttpServer = struct {
             hash_ctx.pipeline_op = .splice_to_hash;
             hash_ctx.bytes_transferred = 0;
 
-            // Запускаем 3 операции параллельно
             try self.ring.queueTee(pipes1[0], pipes2[1], @intCast(content_length), @intFromPtr(tee_ctx));
             try self.file_storage.queueSplice(pipes1[0], offset, @intCast(content_length), @intFromPtr(file_ctx));
             try self.ring.queueSplice(pipes2[0], -1, pipeline_state.hash_socket, -1, @intCast(content_length), @intFromPtr(hash_ctx));
@@ -497,6 +537,19 @@ pub const HttpServer = struct {
         _ = try posix.send(ctx.conn_fd, response, 0);
         posix.close(ctx.conn_fd);
 
+        if (ctx.buffer) |buf| self.allocator.free(buf);
+        self.allocator.destroy(ctx);
+    }
+
+    fn respondWithStatus(self: *HttpServer, ctx: *OpContext, status: []const u8) void {
+        var response_buf: [128]u8 = undefined;
+        const response = std.fmt.bufPrint(
+            &response_buf,
+            "HTTP/1.1 {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            .{status},
+        ) catch unreachable;
+        _ = posix.send(ctx.conn_fd, response, 0) catch {};
+        posix.close(ctx.conn_fd);
         if (ctx.buffer) |buf| self.allocator.free(buf);
         self.allocator.destroy(ctx);
     }
