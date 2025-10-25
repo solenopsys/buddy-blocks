@@ -1,4 +1,8 @@
-# Buddy Blocks Storage Server
+![Logo](logo.svg)
+
+# Buddy Blocks Node 
+
+
 
 Buddy Blocks is a content-addressed block storage server written in Zig. It relies on Linux `io_uring`, LMDBX, and a custom buddy allocator to provide S3-class throughput on commodity hardware (even single-board computers).
 
@@ -15,6 +19,22 @@ Buddy Blocks is a content-addressed block storage server written in Zig. It reli
 - Deliver production-grade block storage for decentralised networks
 - Run comfortably on $10 SBCs (Orange Pi / Raspberry Pi) with 1–2 GB RAM
 - Match the operational profile of professional S3-compatible systems while remaining simple to operate and audit
+
+## Current performance
+
+Benchmarks (Zig 0.15.1, Linux 6.16.11): laptop 8 core processor
+
+512K blocks
+ - write 1449.09 ops/s | 724.55 MB/s ~ 6 Gb/s
+ - read 2010.02 ops/s | 1100.50 MB/s ~ 9 Gb/s
+ - ~1ms latency
+ - only ~10Mb memory usage 
+
+
+Currently, there are many bottlenecks and inefficiencies, so after addressing them, performance will increase by 5-10 times.
+
+
+
 
 ## Design Principles
 
@@ -284,26 +304,8 @@ const Config = struct {
 
 The controller dynamically adapts its sleep interval based on recent RPS to balance latency and CPU usage.
 
-## Performance
 
-Benchmarks (Zig 0.15.1, Linux 6.16.11):
-
-- Container (Alpine/musl): PUT 3,398 ops/s (13.27 MB/s), GET 1,774 rps, ~1.13 ms latency.
-- Host (glibc): PUT 3,567 ops/s (13.93 MB/s), GET 1,753 rps, ~1.14 ms latency.
-
-Allocator microbenchmarks with 10M blocks:
-
-- Allocate: 23,097 ops/s
-- Get: 72,811 ops/s
-- Free: 31,376 ops/s
-- LMDBX footprint: ~1.1 GB (≈110 bytes/record)
-
-Real-world NVMe profile:
-
-- Metadata lookup: ~10 μs
-- 1 MB block read: ~200 μs
-- Sustained throughput: ≈5 GB/s with 5k ops/s
-- `io_uring` enables parallel I/O queues up to ~20 GB/s
+ 
 
 ### Running Load Tests
 
