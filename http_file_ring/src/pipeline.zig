@@ -217,7 +217,7 @@ pub const DataPipeline = struct {
                 const len = try posix.recv(self.hash_socket, &hash_buffer, 0);
                 if (len == 32) {
                     op_ctx.hash = hash_buffer;
-                    self.service.onHashForBlock(op_ctx.hash, op_ctx.block_info);
+                    self.service.onHashForBlock(op_ctx.hash, op_ctx.block_info, op_ctx.content_length);
                 }
 
                 op_ctx.completed_ops += 1;

@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     const lmdbx_lib = if (musl)
         "../zig-lmdbx/zig-out/lib/liblmdbx-x86_64-musl.so"
     else
-        "../zig-lmdbx/zig-out/lib/liblmdbx.so";
+        "../zig-lmdbx/zig-out/lib/liblmdbx-x86_64-gnu.so";
 
     exe.addObjectFile(b.path(lmdbx_lib));
     exe.addIncludePath(b.path("../zig-lmdbx/libs/libmdbx"));

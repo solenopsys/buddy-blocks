@@ -41,7 +41,7 @@ fn responseFromMessage(msg: messages.Message) ?struct { request_id: u64, res: Co
 }
 
 fn toHttpBlock(block: PoolBlockInfo) HttpBlockInfo {
-    return .{ .block_num = block.block_num, .size_index = block.size };
+    return .{ .block_num = block.block_num, .size_index = block.size, .data_size = 0 };
 }
 
 fn sizeToBytes(size_index: u8) u64 {
@@ -79,9 +79,9 @@ const WorkerService = struct {
         return self.worker.acquireBlock(size_index);
     }
 
-    fn onHashForBlock(ptr: *anyopaque, hash: [32]u8, block: HttpBlockInfo) void {
+    fn onHashForBlock(ptr: *anyopaque, hash: [32]u8, block: HttpBlockInfo, data_size: u64) void {
         const self: *WorkerService = @ptrCast(@alignCast(ptr));
-        self.worker.finishPut(hash, block);
+        self.worker.finishPut(hash, block, data_size);
     }
 
     fn onFreeBlockRequest(ptr: *anyopaque, hash: [32]u8) HttpBlockInfo {
@@ -239,7 +239,9 @@ pub const HttpWorker = struct {
         };
     }
 
-    fn finishPut(self: *HttpWorker, hash: [32]u8, block: HttpBlockInfo) void {
+    fn finishPut(self: *HttpWorker, hash: [32]u8, block: HttpBlockInfo, data_size: u64) void {
+        const block_capacity = sizeToBytes(block.size_index);
+        const stored_size = if (data_size > block_capacity) block_capacity else data_size;
         const req_id = self.nextId();
         self.send(.{ .occupy_block = .{
             .worker_id = self.id,
@@ -247,7 +249,7 @@ pub const HttpWorker = struct {
             .hash = hash,
             .block_num = block.block_num,
             .size = block.size_index,
-            .data_size = sizeToBytes(block.size_index),
+            .data_size = stored_size,
         } });
 
         switch (self.awaitControllerResponse(req_id)) {
@@ -266,7 +268,7 @@ pub const HttpWorker = struct {
         } });
 
         return switch (self.awaitControllerResponse(req_id)) {
-            .release => .{ .block_num = 0, .size_index = 0 },
+            .release => .{ .block_num = 0, .size_index = 0, .data_size = 0 },
             .err => @panic("controller release error"),
             else => unreachable,
         };
@@ -285,7 +287,7 @@ pub const HttpWorker = struct {
                 const size_index = bytesToSizeIndex(res.size);
                 const block_size = sizeToBytes(size_index);
                 const block_num = if (block_size == 0) res.offset else res.offset / block_size;
-                break :blk .{ .block_num = block_num, .size_index = size_index };
+                break :blk .{ .block_num = block_num, .size_index = size_index, .data_size = res.data_size };
             },
             .err => error.BlockNotFound,
             else => unreachable,

@@ -95,6 +95,14 @@ pub const OpContext = struct {
 pub const BlockInfo = struct {
     block_num: u64,
     size_index: u8 = 0,
+    data_size: u64 = 0,
+
+    pub fn capacityBytes(self: BlockInfo) usize {
+        const capped_index: u8 = if (self.size_index > 7) 7 else self.size_index;
+        const shift: u6 = @intCast(capped_index);
+        const capacity: u64 = (@as(u64, 4096)) << shift;
+        return @intCast(capacity);
+    }
 };
 
 /// Интерфейс сервиса управления блоками
@@ -104,7 +112,7 @@ pub const WorkerServiceInterface = struct {
 
     pub const VTable = struct {
         onBlockInputRequest: *const fn (ptr: *anyopaque, size_index: u8) BlockInfo,
-        onHashForBlock: *const fn (ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo) void,
+        onHashForBlock: *const fn (ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo, data_size: u64) void,
         onFreeBlockRequest: *const fn (ptr: *anyopaque, hash: [32]u8) BlockInfo,
         onBlockAddressRequest: *const fn (ptr: *anyopaque, hash: [32]u8) WorkerServiceError!BlockInfo,
         onBlockExistsRequest: *const fn (ptr: *anyopaque, hash: [32]u8) anyerror!bool,
@@ -115,8 +123,8 @@ pub const WorkerServiceInterface = struct {
         return self.vtable.onBlockInputRequest(self.ptr, size_index);
     }
 
-    pub fn onHashForBlock(self: WorkerServiceInterface, hash: [32]u8, block_info: BlockInfo) void {
-        self.vtable.onHashForBlock(self.ptr, hash, block_info);
+    pub fn onHashForBlock(self: WorkerServiceInterface, hash: [32]u8, block_info: BlockInfo, data_size: u64) void {
+        self.vtable.onHashForBlock(self.ptr, hash, block_info, data_size);
     }
 
     pub fn onFreeBlockRequest(self: WorkerServiceInterface, hash: [32]u8) BlockInfo {

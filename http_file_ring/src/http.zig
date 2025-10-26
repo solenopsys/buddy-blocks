@@ -16,6 +16,20 @@ const HashSocketPool = @import("hash_socket_pool.zig").HashSocketPool;
 const max_header_bytes: usize = 16 * 1024; // cap HTTP header size to 16KB
 const max_block_bytes: usize = 4096 * 128; // 512 KB
 
+fn sizeIndexForLength(length: usize) u8 {
+    if (length <= 4096) return 0;
+    var idx: u8 = 0;
+    var capacity: usize = 4096;
+    while (idx < 7 and capacity < length) : (idx += 1) {
+        capacity <<= 1;
+    }
+    return idx;
+}
+
+fn blockOffset(info: interfaces.BlockInfo) u64 {
+    return info.block_num * @as(u64, info.capacityBytes());
+}
+
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
     ring: *Ring,
@@ -216,23 +230,23 @@ pub const HttpServer = struct {
             self.respondWithStatus(ctx, "411 Length Required");
             return;
         }
-        if (content_length < 4096 or (content_length % 4096) != 0) {
-            self.respondWithStatus(ctx, "400 Bad Request");
-            return;
-        }
+
         if (content_length > max_block_bytes) {
             self.respondWithStatus(ctx, "413 Payload Too Large");
             return;
         }
 
-        const ratio = content_length / 4096;
-        if (!std.math.isPowerOfTwo(ratio)) {
-            self.respondWithStatus(ctx, "400 Bad Request");
+        const size_index = sizeIndexForLength(content_length);
+        const block_info = self.service.onBlockInputRequest(size_index);
+        const block_capacity = block_info.capacityBytes();
+        if (content_length > block_capacity) {
+            std.debug.print(
+                "ERROR: content_length {d} exceeds allocated capacity {d} for block_num {d}\n",
+                .{ content_length, block_capacity, block_info.block_num },
+            );
+            self.respondWithStatus(ctx, "500 Internal Server Error");
             return;
         }
-
-        const size_index: u8 = @intCast(std.math.log2_int(usize, ratio));
-        const block_info = self.service.onBlockInputRequest(size_index);
 
         if (body_in_buffer.len > content_length) {
             self.respondWithStatus(ctx, "400 Bad Request");
@@ -286,8 +300,7 @@ pub const HttpServer = struct {
             posix.close(pipes1[1]);
             pipeline_state.pipe1_write = -1;
 
-            const block_size = content_length;
-            const offset = block_info.block_num * block_size;
+            const offset = blockOffset(block_info);
 
             const tee_ctx = try self.allocator.create(OpContext);
             tee_ctx.* = .{
@@ -421,14 +434,25 @@ pub const HttpServer = struct {
             self.allocator.destroy(ctx);
             return;
         };
-        const block_size: u64 = @as(u64, 4096) << @intCast(block_info.size_index);
-        const offset = block_info.block_num * block_size;
-        std.debug.print("GET hit for hash {s} -> block_num {d}, offset {d}, size {d}\n", .{ hex_hash, block_info.block_num, offset, block_size });
+        const block_capacity = block_info.capacityBytes();
+        const data_length: usize = @intCast(@min(block_info.data_size, block_capacity));
+        const offset = blockOffset(block_info);
+        std.debug.print(
+            "GET hit for hash {s} -> block_num {d}, offset {d}, data_size {d}, capacity {d}\n",
+            .{ hex_hash, block_info.block_num, offset, data_length, block_capacity },
+        );
 
         // Отправляем HTTP заголовки
         var header_buf: [256]u8 = undefined;
-        const headers = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{block_size}) catch unreachable;
+        const headers = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{data_length}) catch unreachable;
         _ = try posix.send(ctx.conn_fd, headers, 0);
+
+        if (data_length == 0) {
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
 
         // Создаем pipe для splice
         const pipes = try posix.pipe();
@@ -445,7 +469,7 @@ pub const HttpServer = struct {
             .op_type = .read_block,
             .conn_fd = ctx.conn_fd,
             .block_info = block_info,
-            .content_length = block_size,
+            .content_length = data_length,
             .hash = hash,
             .buffer = null,
             .pipeline_state = null,
@@ -454,11 +478,11 @@ pub const HttpServer = struct {
 
         // Сохраняем информацию о pipe в OpContext используя pipeline_state как указатель
         const pipe_state = try self.allocator.create(interfaces.PipelineState);
-        pipe_state.* = interfaces.PipelineState.init(pipes[0], pipes[1], -1, -1, -1);  // hash_socket = -1 для GET
+        pipe_state.* = interfaces.PipelineState.init(pipes[0], pipes[1], -1, -1, -1); // hash_socket = -1 для GET
         read_ctx.pipeline_state = pipe_state;
 
         // Запускаем splice: file -> pipe (используем queueSplice из ring напрямую)
-        try self.ring.queueSplice(self.file_storage.fd, @intCast(offset), pipes[1], -1, @intCast(block_size), @intFromPtr(read_ctx));
+        try self.ring.queueSplice(self.file_storage.fd, @intCast(offset), pipes[1], -1, @intCast(data_length), @intFromPtr(read_ctx));
         _ = try self.ring.submit();
 
         if (ctx.buffer) |buf| self.allocator.free(buf);
@@ -583,8 +607,7 @@ pub const HttpServer = struct {
 
         ctx.bytes_transferred += @intCast(res);
         if (ctx.bytes_transferred < ctx.content_length) {
-            const block_size = ctx.content_length;
-            const offset_base = ctx.block_info.block_num * block_size;
+            const offset_base = blockOffset(ctx.block_info);
             const next_offset = offset_base + ctx.bytes_transferred;
             const remaining = ctx.content_length - ctx.bytes_transferred;
             try self.ring.queueSplice(self.file_storage.fd, @intCast(next_offset), state.pipe1_write, -1, @intCast(remaining), @intFromPtr(ctx));
@@ -755,8 +778,7 @@ pub const HttpServer = struct {
                 ctx.bytes_transferred = 0;
 
                 // Запускаем 3 параллельные операции
-                const block_size = ctx.content_length;
-                const offset = ctx.block_info.block_num * block_size;
+                const offset = blockOffset(ctx.block_info);
 
                 // Создаем контексты для каждой операции
                 const tee_ctx = try self.allocator.create(OpContext);
@@ -841,8 +863,7 @@ pub const HttpServer = struct {
                 if (ctx.bytes_transferred < ctx.content_length) {
                     const total_written = ctx.bytes_transferred;
                     const remaining = ctx.content_length - total_written;
-                    const block_size = ctx.content_length;
-                    const file_offset = ctx.block_info.block_num * block_size + total_written;
+                    const file_offset = blockOffset(ctx.block_info) + total_written;
                     try self.file_storage.queueSplice(state.pipe1_read, file_offset, @intCast(remaining), @intFromPtr(ctx));
                     _ = try self.ring.submit();
                     return;
@@ -923,7 +944,7 @@ pub const HttpServer = struct {
         }
 
         // Сохраняем сопоставление хеша и блока после полной обработки
-        self.service.onHashForBlock(state.hash, ctx.block_info);
+        self.service.onHashForBlock(state.hash, ctx.block_info, ctx.content_length);
 
         std.debug.print("Responding with hash {s} for block_num {d}\n", .{ hex_hash, ctx.block_info.block_num });
 

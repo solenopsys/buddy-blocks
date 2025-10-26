@@ -88,6 +88,7 @@ pub const BuddyControllerHandler = struct {
             .request_id = msg.request_id,
             .offset = BuddyAllocator.getOffset(metadata),
             .size = @intFromEnum(metadata.block_size),
+            .data_size = metadata.data_size,
         };
     }
 
@@ -263,6 +264,7 @@ test "MockControllerHandler - get address" {
         .request_id = 400,
         .offset = 8192,
         .size = 2048,
+        .data_size = 1024,
     };
 
     const iface = handler.interface();
@@ -277,6 +279,7 @@ test "MockControllerHandler - get address" {
 
     try testing.expectEqual(@as(u64, 8192), result.offset);
     try testing.expectEqual(@as(u64, 2048), result.size);
+    try testing.expectEqual(@as(u64, 1024), result.data_size);
 
     // Проверяем что запрос был записан
     try testing.expect(handler.last_get_address != null);

@@ -90,6 +90,7 @@ pub const GetAddressResult = struct {
     request_id: u64,
     offset: u64,
     size: u64,
+    data_size: u64,
 };
 
 pub const HasBlockResult = struct {

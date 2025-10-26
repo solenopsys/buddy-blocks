@@ -467,6 +467,7 @@ test "BatchController - processBatches порядок обработки" {
         .request_id = 4,
         .offset = 8192,
         .size = 2048,
+        .data_size = 1024,
     };
 
     const handler_iface = mock_handler.interface();
@@ -521,6 +522,7 @@ test "BatchController - processBatches порядок обработки" {
 
     // Проверяем содержимое результатов
     try testing.expectEqual(@as(u64, 8192), controller.get_address_results.items[0].offset);
+    try testing.expectEqual(@as(u64, 1024), controller.get_address_results.items[0].data_size);
 }
 
 test "BatchController - sendResults отправка в правильные очереди" {
@@ -560,6 +562,7 @@ test "BatchController - sendResults отправка в правильные о�
         .request_id = 2,
         .offset = 8192,
         .size = 2048,
+        .data_size = 1024,
     });
 
     // Отправляем результаты
@@ -573,6 +576,7 @@ test "BatchController - sendResults отправка в правильные о�
     try testing.expect(queue2.interface().pop(&msg1));
     try testing.expectEqual(std.meta.Tag(messages.Message).get_address_result, std.meta.activeTag(msg1));
     try testing.expectEqual(@as(u64, 2), msg1.get_address_result.request_id);
+    try testing.expectEqual(@as(u64, 1024), msg1.get_address_result.data_size);
 
     var msg2: messages.Message = undefined;
     try testing.expect(queue2.interface().pop(&msg2));

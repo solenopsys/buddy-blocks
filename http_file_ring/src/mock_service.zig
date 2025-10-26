@@ -49,10 +49,11 @@ pub const MockWorkerService = struct {
         return BlockInfo{
             .block_num = block_num,
             .size_index = size_index,
+            .data_size = 0,
         };
     }
 
-    fn onHashForBlock(ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo) void {
+    fn onHashForBlock(ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo, data_size: u64) void {
         const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
 
         // Сохраняем маппинг hash -> block_info
@@ -61,6 +62,9 @@ pub const MockWorkerService = struct {
 
         var key_buf = hashToHex(hash);
 
+        var stored_info = block_info;
+        stored_info.data_size = data_size;
+
         // Аллоцируем память для ключа (иначе key_buf уничтожится при выходе)
         const key = self.allocator.alloc(u8, 64) catch |err| {
             std.debug.print("MockWorkerService: Failed to allocate key: {}\n", .{err});
@@ -68,13 +72,16 @@ pub const MockWorkerService = struct {
         };
         @memcpy(key, &key_buf);
 
-        self.hash_map.put(key, block_info) catch |err| {
+        self.hash_map.put(key, stored_info) catch |err| {
             std.debug.print("MockWorkerService: Failed to store hash mapping: {}\n", .{err});
             self.allocator.free(key);
             return;
         };
 
-        std.debug.print("Stored hash {s} -> block_num {d}, size_index {d}, total mapped {d}\n", .{ key, block_info.block_num, block_info.size_index, self.hash_map.count() });
+        std.debug.print(
+            "Stored hash {s} -> block_num {d}, size_index {d}, data_size {d}, total mapped {d}\n",
+            .{ key, stored_info.block_num, stored_info.size_index, stored_info.data_size, self.hash_map.count() },
+        );
     }
 
     fn onFreeBlockRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {
