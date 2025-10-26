@@ -25,6 +25,7 @@ pub const BuddyControllerHandler = struct {
                 .handle_occupy = handleOccupyImpl,
                 .handle_release = handleReleaseImpl,
                 .handle_get_address = handleGetAddressImpl,
+                .handle_has_block = handleHasBlockImpl,
             },
         };
     }
@@ -90,6 +91,17 @@ pub const BuddyControllerHandler = struct {
         };
     }
 
+    fn handleHasBlockImpl(ptr: *anyopaque, msg: messages.HasBlockRequest) !messages.HasBlockResult {
+        const self: *BuddyControllerHandler = @ptrCast(@alignCast(ptr));
+
+        const exists = try self.buddy_allocator.hasBlock(msg.hash);
+        return .{
+            .worker_id = msg.worker_id,
+            .request_id = msg.request_id,
+            .exists = exists,
+        };
+    }
+
     fn indexToBlockSize(index: u8) !BlockSize {
         return switch (index) {
             0 => .size_4k,
@@ -110,12 +122,14 @@ pub const BuddyControllerHandler = struct {
 pub const MockControllerHandler = struct {
     allocate_response: ?messages.AllocateResult = null,
     get_address_response: ?messages.GetAddressResult = null,
+    has_block_response: ?messages.HasBlockResult = null,
 
     // Для проверки в тестах
     last_allocate: ?messages.AllocateRequest = null,
     last_occupy: ?messages.OccupyRequest = null,
     last_release: ?messages.ReleaseRequest = null,
     last_get_address: ?messages.GetAddressRequest = null,
+    last_has_block: ?messages.HasBlockRequest = null,
 
     pub fn init() MockControllerHandler {
         return .{};
@@ -129,6 +143,7 @@ pub const MockControllerHandler = struct {
                 .handle_occupy = handleOccupyImpl,
                 .handle_release = handleReleaseImpl,
                 .handle_get_address = handleGetAddressImpl,
+                .handle_has_block = handleHasBlockImpl,
             },
         };
     }
@@ -159,6 +174,12 @@ pub const MockControllerHandler = struct {
         const self: *MockControllerHandler = @ptrCast(@alignCast(ptr));
         self.last_get_address = msg;
         return self.get_address_response orelse error.NotConfigured;
+    }
+
+    fn handleHasBlockImpl(ptr: *anyopaque, msg: messages.HasBlockRequest) !messages.HasBlockResult {
+        const self: *MockControllerHandler = @ptrCast(@alignCast(ptr));
+        self.last_has_block = msg;
+        return self.has_block_response orelse error.NotConfigured;
     }
 };
 
@@ -206,6 +227,8 @@ test "MockControllerHandler - occupy" {
         .request_id = 200,
         .hash = [_]u8{0xAA} ** 32,
         .block_num = 100,
+        .size = 0,
+        .data_size = 1024,
     };
 
     _ = try iface.handleOccupy(request);

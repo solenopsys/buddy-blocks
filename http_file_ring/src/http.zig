@@ -194,6 +194,10 @@ pub const HttpServer = struct {
             try self.handlePut(ctx, &httpRequest, body_in_buffer);
         } else if (std.mem.eql(u8, method, "GET")) {
             try self.handleGet(ctx, &httpRequest);
+        } else if (std.mem.eql(u8, method, "HEAD")) {
+            try self.handleHead(ctx, &httpRequest);
+        } else if (std.mem.eql(u8, method, "PATCH")) {
+            try self.handlePatch(ctx, &httpRequest, body_in_buffer);
         } else if (std.mem.eql(u8, method, "DELETE")) {
             try self.handleDelete(ctx, &httpRequest);
         } else {
@@ -318,6 +322,58 @@ pub const HttpServer = struct {
         self.allocator.destroy(ctx);
     }
 
+    fn handleHead(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest) !void {
+        const path = req.params.path;
+
+        if (path.len < 2 or path[0] != '/') {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        const hex_hash = path[1..];
+        if (hex_hash.len != 64) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        var hash: [32]u8 = undefined;
+        for (0..32) |i| {
+            hash[i] = std.fmt.parseInt(u8, hex_hash[i * 2 .. i * 2 + 2], 16) catch {
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                _ = try posix.send(ctx.conn_fd, response, 0);
+                posix.close(ctx.conn_fd);
+                if (ctx.buffer) |buf| self.allocator.free(buf);
+                self.allocator.destroy(ctx);
+                return;
+            };
+        }
+
+        const exists = self.service.onBlockExistsRequest(hash) catch {
+            self.respondWithStatus(ctx, "500 Internal Server Error");
+            return;
+        };
+
+        const payload_slice: []const u8 = if (exists) "true"[0..4] else "false"[0..5];
+        const payload_len = payload_slice.len;
+        var header_buf: [128]u8 = undefined;
+        const response = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{payload_len}) catch unreachable;
+        _ = try posix.send(ctx.conn_fd, response, 0);
+        if (payload_len > 0) {
+            _ = try posix.send(ctx.conn_fd, payload_slice, 0);
+        }
+        posix.close(ctx.conn_fd);
+        if (ctx.buffer) |buf| self.allocator.free(buf);
+        self.allocator.destroy(ctx);
+    }
+
     fn handleGet(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest) !void {
         const path = req.params.path;
 
@@ -405,6 +461,97 @@ pub const HttpServer = struct {
         try self.ring.queueSplice(self.file_storage.fd, @intCast(offset), pipes[1], -1, @intCast(block_size), @intFromPtr(read_ctx));
         _ = try self.ring.submit();
 
+        if (ctx.buffer) |buf| self.allocator.free(buf);
+        self.allocator.destroy(ctx);
+    }
+
+    fn handlePatch(self: *HttpServer, ctx: *OpContext, req: *const picozig.HttpRequest, body_in_buffer: []const u8) !void {
+        const path = req.params.path;
+        const prefix = "/lock/";
+        if (!std.mem.startsWith(u8, path, prefix)) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        const rest = path[prefix.len..];
+        const slash_index = std.mem.indexOfScalar(u8, rest, '/') orelse {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        };
+
+        const hex_hash = rest[0..slash_index];
+        const resource_id = rest[slash_index + 1 ..];
+        if (hex_hash.len != 64 or resource_id.len == 0) {
+            const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            _ = try posix.send(ctx.conn_fd, response, 0);
+            posix.close(ctx.conn_fd);
+            if (ctx.buffer) |buf| self.allocator.free(buf);
+            self.allocator.destroy(ctx);
+            return;
+        }
+
+        var hash: [32]u8 = undefined;
+        for (0..32) |i| {
+            hash[i] = std.fmt.parseInt(u8, hex_hash[i * 2 .. i * 2 + 2], 16) catch {
+                const response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                _ = try posix.send(ctx.conn_fd, response, 0);
+                posix.close(ctx.conn_fd);
+                if (ctx.buffer) |buf| self.allocator.free(buf);
+                self.allocator.destroy(ctx);
+                return;
+            };
+        }
+
+        const content_length = getContentLength(req);
+        if (content_length == 0) {
+            self.respondWithStatus(ctx, "411 Length Required");
+            return;
+        }
+
+        if (body_in_buffer.len > content_length) {
+            self.respondWithStatus(ctx, "400 Bad Request");
+            return;
+        }
+
+        var payload = try self.allocator.alloc(u8, content_length);
+        defer self.allocator.free(payload);
+
+        var filled: usize = 0;
+        if (body_in_buffer.len > 0) {
+            @memcpy(payload[0..body_in_buffer.len], body_in_buffer);
+            filled = body_in_buffer.len;
+        }
+
+        while (filled < content_length) {
+            const chunk = posix.recv(ctx.conn_fd, payload[filled..content_length], 0) catch {
+                self.respondWithStatus(ctx, "400 Bad Request");
+                return;
+            };
+
+            if (chunk == 0) {
+                self.respondWithStatus(ctx, "400 Bad Request");
+                return;
+            }
+
+            filled += chunk;
+        }
+
+        self.service.onLockPatchRequest(hash, resource_id, payload) catch {
+            self.respondWithStatus(ctx, "500 Internal Server Error");
+            return;
+        };
+
+        const response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        _ = try posix.send(ctx.conn_fd, response, 0);
+        posix.close(ctx.conn_fd);
         if (ctx.buffer) |buf| self.allocator.free(buf);
         self.allocator.destroy(ctx);
     }

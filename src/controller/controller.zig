@@ -24,12 +24,16 @@ pub const BatchController = struct {
     occupy_requests: std.ArrayList(messages.OccupyRequest),
     release_requests: std.ArrayList(messages.ReleaseRequest),
     get_address_requests: std.ArrayList(messages.GetAddressRequest),
+    has_block_requests: std.ArrayList(messages.HasBlockRequest),
+    lock_update_requests: std.ArrayList(messages.LockUpdateRequest),
 
     // Буферы для результатов (чтобы отправить после обработки батча)
     allocate_results: std.ArrayList(messages.AllocateResult),
     occupy_results: std.ArrayList(messages.OccupyResult),
     release_results: std.ArrayList(messages.ReleaseResult),
     get_address_results: std.ArrayList(messages.GetAddressResult),
+    has_block_results: std.ArrayList(messages.HasBlockResult),
+    lock_update_results: std.ArrayList(messages.LockUpdateResult),
     error_results: std.ArrayList(messages.ErrorResult),
 
     // Регулятор пауз
@@ -56,10 +60,14 @@ pub const BatchController = struct {
             .occupy_requests = .{},
             .release_requests = .{},
             .get_address_requests = .{},
+            .has_block_requests = .{},
+            .lock_update_requests = .{},
             .allocate_results = .{},
             .occupy_results = .{},
             .release_results = .{},
             .get_address_results = .{},
+            .has_block_results = .{},
+            .lock_update_results = .{},
             .error_results = .{},
             .pause_regulator = PauseRegulator.init(low_rps_pause_ns),
             .running = std.atomic.Value(bool).init(true),
@@ -67,14 +75,22 @@ pub const BatchController = struct {
     }
 
     pub fn deinit(self: *BatchController) void {
+        for (self.lock_update_requests.items) |req| {
+            req.allocator.free(req.key);
+            req.allocator.free(req.value);
+        }
         self.allocate_requests.deinit(self.allocator);
         self.occupy_requests.deinit(self.allocator);
         self.release_requests.deinit(self.allocator);
         self.get_address_requests.deinit(self.allocator);
+        self.has_block_requests.deinit(self.allocator);
+        self.lock_update_requests.deinit(self.allocator);
         self.allocate_results.deinit(self.allocator);
         self.occupy_results.deinit(self.allocator);
         self.release_results.deinit(self.allocator);
         self.get_address_results.deinit(self.allocator);
+        self.has_block_results.deinit(self.allocator);
+        self.lock_update_results.deinit(self.allocator);
         self.error_results.deinit(self.allocator);
     }
 
@@ -122,6 +138,8 @@ pub const BatchController = struct {
                     .occupy_block => |req| try self.occupy_requests.append(self.allocator, req),
                     .release_block => |req| try self.release_requests.append(self.allocator, req),
                     .get_address => |req| try self.get_address_requests.append(self.allocator, req),
+                    .has_block => |req| try self.has_block_requests.append(self.allocator, req),
+                    .lock_update => |req| try self.lock_update_requests.append(self.allocator, req),
                     else => {}, // Игнорируем некорректные сообщения
                 }
             }
@@ -147,6 +165,20 @@ pub const BatchController = struct {
             try self.get_address_results.append(self.allocator, result);
         }
         self.get_address_requests.clearRetainingCapacity();
+
+        // 2. HasBlock - также read-only
+        for (self.has_block_requests.items) |req| {
+            const result = self.message_handler.handleHasBlock(req) catch |err| {
+                try self.error_results.append(self.allocator, .{
+                    .worker_id = req.worker_id,
+                    .request_id = req.request_id,
+                    .code = errorToCode(err),
+                });
+                continue;
+            };
+            try self.has_block_results.append(self.allocator, result);
+        }
+        self.has_block_requests.clearRetainingCapacity();
 
         // 2. Release - освобождаем блоки (возвращаем в buddy allocator)
         for (self.release_requests.items) |req| {
@@ -192,6 +224,37 @@ pub const BatchController = struct {
             try self.occupy_results.append(self.allocator, result);
         }
         self.occupy_requests.clearRetainingCapacity();
+
+        // 5. Lock updates - произвольные ключи
+        for (self.lock_update_requests.items) |req| {
+            var request = req;
+            defer {
+                request.allocator.free(request.key);
+                request.allocator.free(request.value);
+            }
+
+            if (self.db) |db| {
+                db.put(request.key, request.value) catch |err| {
+                    try self.error_results.append(self.allocator, .{
+                        .worker_id = request.worker_id,
+                        .request_id = request.request_id,
+                        .code = errorToCode(err),
+                    });
+                    continue;
+                };
+                try self.lock_update_results.append(self.allocator, .{
+                    .worker_id = request.worker_id,
+                    .request_id = request.request_id,
+                });
+            } else {
+                try self.error_results.append(self.allocator, .{
+                    .worker_id = request.worker_id,
+                    .request_id = request.request_id,
+                    .code = messages.ErrorCode.internal_error,
+                });
+            }
+        }
+        self.lock_update_requests.clearRetainingCapacity();
     }
 
     /// Отправить результаты в исходящие очереди workers
@@ -205,6 +268,16 @@ pub const BatchController = struct {
             _ = self.worker_queues[worker_id].to_worker.push(msg);
         }
         self.get_address_results.clearRetainingCapacity();
+
+        // Отправляем HasBlock результаты
+        for (self.has_block_results.items) |result| {
+            const worker_id = result.worker_id;
+            if (worker_id >= self.worker_queues.len) continue;
+
+            const msg = messages.Message{ .has_block_result = result };
+            _ = self.worker_queues[worker_id].to_worker.push(msg);
+        }
+        self.has_block_results.clearRetainingCapacity();
 
         // Отправляем Release результаты
         for (self.release_results.items) |result| {
@@ -235,6 +308,16 @@ pub const BatchController = struct {
             _ = self.worker_queues[worker_id].to_worker.push(msg);
         }
         self.occupy_results.clearRetainingCapacity();
+
+        // Отправляем LockUpdate результаты
+        for (self.lock_update_results.items) |result| {
+            const worker_id = result.worker_id;
+            if (worker_id >= self.worker_queues.len) continue;
+
+            const msg = messages.Message{ .lock_update_result = result };
+            _ = self.worker_queues[worker_id].to_worker.push(msg);
+        }
+        self.lock_update_results.clearRetainingCapacity();
 
         // Отправляем Error результаты
         for (self.error_results.items) |result| {
@@ -342,7 +425,14 @@ test "BatchController - collectMessages разложение по типам" {
 
     // Отправляем разные типы сообщений
     _ = queue1.interface().push(.{ .allocate_block = .{ .worker_id = 0, .request_id = 1, .size = 2 } });
-    _ = queue1.interface().push(.{ .occupy_block = .{ .worker_id = 0, .request_id = 2, .hash = [_]u8{0xAA} ** 32, .block_num = 100 } });
+    _ = queue1.interface().push(.{ .occupy_block = .{
+        .worker_id = 0,
+        .request_id = 2,
+        .hash = [_]u8{0xAA} ** 32,
+        .block_num = 100,
+        .size = 2,
+        .data_size = 4096,
+    } });
     _ = queue1.interface().push(.{ .release_block = .{ .worker_id = 0, .request_id = 3, .hash = [_]u8{0xBB} ** 32 } });
     _ = queue1.interface().push(.{ .get_address = .{ .worker_id = 0, .request_id = 4, .hash = [_]u8{0xCC} ** 32 } });
 
@@ -403,7 +493,14 @@ test "BatchController - processBatches порядок обработки" {
 
     // Добавляем запросы напрямую в батч-буферы
     try controller.allocate_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 1, .size = 2 });
-    try controller.occupy_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 2, .hash = [_]u8{0xAA} ** 32, .block_num = 100 });
+    try controller.occupy_requests.append(controller.allocator, .{
+        .worker_id = 0,
+        .request_id = 2,
+        .hash = [_]u8{0xAA} ** 32,
+        .block_num = 100,
+        .size = 2,
+        .data_size = 4096,
+    });
     try controller.release_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 3, .hash = [_]u8{0xBB} ** 32 });
     try controller.get_address_requests.append(controller.allocator, .{ .worker_id = 0, .request_id = 4, .hash = [_]u8{0xCC} ** 32 });
 

@@ -145,6 +145,10 @@ pub const BuddyAllocator = struct {
         return BlockMetadata.decode(data);
     }
 
+    pub fn hasBlock(self: *BuddyAllocator, hash: [32]u8) !bool {
+        return try self.db.hasKey(hash[0..]);
+    }
+
     /// Update hash for an existing block (replace old hash with new hash)
     /// Used when converting from temporary hash to real content hash
     pub fn updateHash(self: *BuddyAllocator, old_hash: [32]u8, new_hash: [32]u8) !BlockMetadata {

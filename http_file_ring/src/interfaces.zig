@@ -107,6 +107,8 @@ pub const WorkerServiceInterface = struct {
         onHashForBlock: *const fn (ptr: *anyopaque, hash: [32]u8, block_info: BlockInfo) void,
         onFreeBlockRequest: *const fn (ptr: *anyopaque, hash: [32]u8) BlockInfo,
         onBlockAddressRequest: *const fn (ptr: *anyopaque, hash: [32]u8) WorkerServiceError!BlockInfo,
+        onBlockExistsRequest: *const fn (ptr: *anyopaque, hash: [32]u8) anyerror!bool,
+        onLockPatchRequest: *const fn (ptr: *anyopaque, hash: [32]u8, resource_id: []const u8, body: []const u8) anyerror!void,
     };
 
     pub fn onBlockInputRequest(self: WorkerServiceInterface, size_index: u8) BlockInfo {
@@ -123,5 +125,13 @@ pub const WorkerServiceInterface = struct {
 
     pub fn onBlockAddressRequest(self: WorkerServiceInterface, hash: [32]u8) WorkerServiceError!BlockInfo {
         return self.vtable.onBlockAddressRequest(self.ptr, hash);
+    }
+
+    pub fn onBlockExistsRequest(self: WorkerServiceInterface, hash: [32]u8) anyerror!bool {
+        return self.vtable.onBlockExistsRequest(self.ptr, hash);
+    }
+
+    pub fn onLockPatchRequest(self: WorkerServiceInterface, hash: [32]u8, resource_id: []const u8, body: []const u8) anyerror!void {
+        return self.vtable.onLockPatchRequest(self.ptr, hash, resource_id, body);
     }
 };

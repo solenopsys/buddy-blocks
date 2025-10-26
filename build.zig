@@ -83,14 +83,22 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    mod_tests.addObjectFile(b.path(lmdbx_lib));
+    mod_tests.addIncludePath(b.path("../zig-lmdbx/libs/libmdbx"));
+    mod_tests.linkLibC();
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    run_mod_tests.setEnvironmentVariable("LD_LIBRARY_PATH", "../zig-lmdbx/zig-out/lib");
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    exe_tests.addObjectFile(b.path(lmdbx_lib));
+    exe_tests.addIncludePath(b.path("../zig-lmdbx/libs/libmdbx"));
+    exe_tests.linkLibC();
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    run_exe_tests.setEnvironmentVariable("LD_LIBRARY_PATH", "../zig-lmdbx/zig-out/lib");
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);

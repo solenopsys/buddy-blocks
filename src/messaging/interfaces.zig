@@ -35,6 +35,7 @@ pub const IControllerHandler = struct {
         handle_occupy: *const fn (ptr: *anyopaque, msg: messages.OccupyRequest) anyerror!messages.OccupyResult,
         handle_release: *const fn (ptr: *anyopaque, msg: messages.ReleaseRequest) anyerror!void,
         handle_get_address: *const fn (ptr: *anyopaque, msg: messages.GetAddressRequest) anyerror!messages.GetAddressResult,
+        handle_has_block: *const fn (ptr: *anyopaque, msg: messages.HasBlockRequest) anyerror!messages.HasBlockResult,
     };
 
     pub fn handleAllocate(self: IControllerHandler, msg: messages.AllocateRequest) !messages.AllocateResult {
@@ -51,6 +52,10 @@ pub const IControllerHandler = struct {
 
     pub fn handleGetAddress(self: IControllerHandler, msg: messages.GetAddressRequest) !messages.GetAddressResult {
         return self.vtable.handle_get_address(self.ptr, msg);
+    }
+
+    pub fn handleHasBlock(self: IControllerHandler, msg: messages.HasBlockRequest) !messages.HasBlockResult {
+        return self.vtable.handle_has_block(self.ptr, msg);
     }
 };
 

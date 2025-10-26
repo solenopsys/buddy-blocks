@@ -35,6 +35,8 @@ pub const MockWorkerService = struct {
                 .onHashForBlock = onHashForBlock,
                 .onFreeBlockRequest = onFreeBlockRequest,
                 .onBlockAddressRequest = onBlockAddressRequest,
+                .onBlockExistsRequest = onBlockExistsRequest,
+                .onLockPatchRequest = onLockPatchRequest,
             },
         };
     }
@@ -115,6 +117,21 @@ pub const MockWorkerService = struct {
         std.debug.print("Lookup miss for hash {s} (mapped {d})\n", .{ key, self.hash_map.count() });
 
         return error.BlockNotFound;
+    }
+
+    fn onBlockExistsRequest(ptr: *anyopaque, hash: [32]u8) !bool {
+        const self: *MockWorkerService = @ptrCast(@alignCast(ptr));
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var key_buf = hashToHex(hash);
+        const key = key_buf[0..];
+        return self.hash_map.get(key) != null;
+    }
+
+    fn onLockPatchRequest(ptr: *anyopaque, _: [32]u8, _: []const u8, _: []const u8) !void {
+        _ = ptr;
     }
 
     fn hashToHex(hash: [32]u8) [64]u8 {

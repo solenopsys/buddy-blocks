@@ -14,12 +14,16 @@ const FileStorage = http_file_ring.FileStorage;
 const HttpServer = http_file_ring.HttpServer;
 const WorkerServiceInterface = http_file_ring.WorkerServiceInterface;
 const HttpBlockInfo = http_file_ring.BlockInfo;
+const ExistsError = error{ ControllerFailed };
+const LockPatchError = error{ LockUpdateFailed } || std.mem.Allocator.Error;
 
 const ControllerResponse = union(enum) {
     allocate: messages.AllocateResult,
     occupy: messages.OccupyResult,
     release: messages.ReleaseResult,
     get_address: messages.GetAddressResult,
+    has_block: messages.HasBlockResult,
+    lock_update: messages.LockUpdateResult,
     err: messages.ErrorResult,
 };
 
@@ -29,6 +33,8 @@ fn responseFromMessage(msg: messages.Message) ?struct { request_id: u64, res: Co
         .occupy_result => |m| .{ .request_id = m.request_id, .res = .{ .occupy = m } },
         .release_result => |m| .{ .request_id = m.request_id, .res = .{ .release = m } },
         .get_address_result => |m| .{ .request_id = m.request_id, .res = .{ .get_address = m } },
+        .has_block_result => |m| .{ .request_id = m.request_id, .res = .{ .has_block = m } },
+        .lock_update_result => |m| .{ .request_id = m.request_id, .res = .{ .lock_update = m } },
         .error_result => |m| .{ .request_id = m.request_id, .res = .{ .err = m } },
         else => null,
     };
@@ -62,6 +68,8 @@ const WorkerService = struct {
                 .onHashForBlock = onHashForBlock,
                 .onFreeBlockRequest = onFreeBlockRequest,
                 .onBlockAddressRequest = onBlockAddressRequest,
+                .onBlockExistsRequest = onBlockExistsRequest,
+                .onLockPatchRequest = onLockPatchRequest,
             },
         };
     }
@@ -84,6 +92,16 @@ const WorkerService = struct {
     fn onBlockAddressRequest(ptr: *anyopaque, hash: [32]u8) http_file_ring.WorkerServiceError!HttpBlockInfo {
         const self: *WorkerService = @ptrCast(@alignCast(ptr));
         return self.worker.lookupBlock(hash);
+    }
+
+    fn onBlockExistsRequest(ptr: *anyopaque, hash: [32]u8) !bool {
+        const self: *WorkerService = @ptrCast(@alignCast(ptr));
+        return self.worker.blockExists(hash);
+    }
+
+    fn onLockPatchRequest(ptr: *anyopaque, hash: [32]u8, resource_id: []const u8, body: []const u8) !void {
+        const self: *WorkerService = @ptrCast(@alignCast(ptr));
+        return self.worker.applyLockPatch(hash, resource_id, body);
     }
 };
 
@@ -272,6 +290,62 @@ pub const HttpWorker = struct {
             .err => error.BlockNotFound,
             else => unreachable,
         };
+    }
+
+    fn blockExists(self: *HttpWorker, hash: [32]u8) ExistsError!bool {
+        const req_id = self.nextId();
+        self.send(.{ .has_block = .{
+            .worker_id = self.id,
+            .request_id = req_id,
+            .hash = hash,
+        } });
+
+        return switch (self.awaitControllerResponse(req_id)) {
+            .has_block => |res| res.exists,
+            .err => |err_msg| switch (err_msg.code) {
+                .block_not_found => false,
+                else => error.ControllerFailed,
+            },
+            else => unreachable,
+        };
+    }
+
+    fn applyLockPatch(self: *HttpWorker, hash: [32]u8, resource_id: []const u8, body: []const u8) LockPatchError!void {
+        var hex_hash: [64]u8 = undefined;
+        for (hash, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_hash[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
+        }
+
+        const key_len = "lock_".len + hex_hash.len + 1 + resource_id.len;
+        const transport_allocator = std.heap.c_allocator;
+        var key_buf = try transport_allocator.alloc(u8, key_len);
+
+        var offset: usize = 0;
+        @memcpy(key_buf[offset .. offset + "lock_".len], "lock_");
+        offset += "lock_".len;
+        @memcpy(key_buf[offset .. offset + hex_hash.len], hex_hash[0..]);
+        offset += hex_hash.len;
+        key_buf[offset] = ':';
+        offset += 1;
+        @memcpy(key_buf[offset .. offset + resource_id.len], resource_id);
+
+        const payload = try transport_allocator.alloc(u8, body.len);
+        @memcpy(payload, body);
+
+        const req_id = self.nextId();
+        self.send(.{ .lock_update = .{
+            .worker_id = self.id,
+            .request_id = req_id,
+            .key = key_buf,
+            .value = payload,
+            .allocator = transport_allocator,
+        } });
+
+        switch (self.awaitControllerResponse(req_id)) {
+            .lock_update => {},
+            .err => return error.LockUpdateFailed,
+            else => unreachable,
+        }
     }
 
     fn send(self: *HttpWorker, msg: messages.Message) void {

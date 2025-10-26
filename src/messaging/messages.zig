@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 /// Общий тип для всех сообщений (передается через SPSC напрямую)
 pub const Message = union(enum) {
@@ -7,12 +8,16 @@ pub const Message = union(enum) {
     occupy_block: OccupyRequest,
     release_block: ReleaseRequest,
     get_address: GetAddressRequest,
+    has_block: HasBlockRequest,
+    lock_update: LockUpdateRequest,
 
     // От Controller → Worker
     allocate_result: AllocateResult,
     occupy_result: OccupyResult,
     release_result: ReleaseResult,
     get_address_result: GetAddressResult,
+    has_block_result: HasBlockResult,
+    lock_update_result: LockUpdateResult,
     error_result: ErrorResult,
 };
 
@@ -45,6 +50,20 @@ pub const GetAddressRequest = struct {
     hash: [32]u8,
 };
 
+pub const HasBlockRequest = struct {
+    worker_id: u8,
+    request_id: u64,
+    hash: [32]u8,
+};
+
+pub const LockUpdateRequest = struct {
+    worker_id: u8,
+    request_id: u64,
+    key: []u8,
+    value: []u8,
+    allocator: Allocator,
+};
+
 // === Ответы от Controller → Worker ===
 
 pub const AllocateResult = struct {
@@ -71,6 +90,17 @@ pub const GetAddressResult = struct {
     request_id: u64,
     offset: u64,
     size: u64,
+};
+
+pub const HasBlockResult = struct {
+    worker_id: u8,
+    request_id: u64,
+    exists: bool,
+};
+
+pub const LockUpdateResult = struct {
+    worker_id: u8,
+    request_id: u64,
 };
 
 pub const ErrorResult = struct {
