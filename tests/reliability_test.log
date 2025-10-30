@@ -1,26 +1,17 @@
-[0;34m[2025-10-24 18:13:21][0m ==========================================
-[0;34m[2025-10-24 18:13:21][0m RELIABILITY TEST STARTED
-[0;34m[2025-10-24 18:13:21][0m Test count: 100000 objects
-[0;34m[2025-10-24 18:13:21][0m ==========================================
-[0;34m[2025-10-24 18:13:21][0m 
+[0;34m[2025-10-30 01:00:20][0m ==========================================
+[0;34m[2025-10-30 01:00:20][0m RELIABILITY TEST STARTED
+[0;34m[2025-10-30 01:00:20][0m Test count: 100 objects
+[0;34m[2025-10-30 01:00:20][0m ==========================================
+[0;34m[2025-10-30 01:00:20][0m 
 === Step 1: Initial cleanup ===
-[0;34m[2025-10-24 18:13:21][0m Cleaning up for fresh test...
-[0;34m[2025-10-24 18:13:21][0m Stopping server...
-[0;32m[2025-10-24 18:13:22] ✓ Server stopped (SIGKILL)[0m
-[0;32m[2025-10-24 18:13:22] ✓ Database removed[0m
-[0;32m[2025-10-24 18:13:24] ✓ Data file removed[0m
-[0;32m[2025-10-24 18:13:24] ✓ pushed.txt removed[0m
-[0;34m[2025-10-24 18:13:24][0m 
+[0;34m[2025-10-30 01:00:20][0m Cleaning up for fresh test...
+[0;34m[2025-10-30 01:00:20][0m Stopping server...
+[0;32m[2025-10-30 01:00:21] ✓ Server stopped (SIGKILL)[0m
+[0;32m[2025-10-30 01:00:21] ✓ Database removed[0m
+[0;32m[2025-10-30 01:00:21] ✓ Data file removed[0m
+[0;32m[2025-10-30 01:00:21] ✓ pushed.txt removed[0m
+[0;34m[2025-10-30 01:00:21][0m 
 === Step 2: Starting server ===
-[0;34m[2025-10-24 18:13:24][0m Starting server...
-[0;34m[2025-10-24 18:13:24][0m Server started with PID: 454795
-[0;34m[2025-10-24 18:13:24][0m Waiting for server to start...
-[0;32m[2025-10-24 18:13:25] ✓ Server started successfully[0m
-[0;34m[2025-10-24 18:13:26][0m 
-=== Step 3: Loading test data ===
-[0;34m[2025-10-24 18:13:26][0m Pushing 100000 objects...
-[0;31m[2025-10-24 18:13:45] ✗ Data load failed[0m
-[0;34m[2025-10-24 18:13:45][0m Stopping server...
-[0;32m[2025-10-24 18:13:46] ✓ Server stopped (SIGKILL)[0m
-[0;34m[2025-10-24 18:13:46][0m Stopping server...
-[0;32m[2025-10-24 18:13:48] ✓ Server stopped (SIGKILL)[0m
+[0;34m[2025-10-30 01:00:21][0m Starting server...
+[0;34m[2025-10-30 01:00:21][0m Server started with PID: 1216609
+[0;34m[2025-10-30 01:00:21][0m Waiting for server to start...

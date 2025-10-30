@@ -47,13 +47,13 @@ pub const HashSocketPool = struct {
     }
 
     pub fn release(self: *HashSocketPool, fd: i32) void {
+        // AF_ALG socket нельзя переиспользовать после вычисления хеша
+        // Закрываем старый socket вместо возврата в пул
+        posix.close(fd);
+
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.free_sockets.append(self.allocator, fd) catch {
-            // Если не можем добавить в пул - просто закрываем
-            posix.close(fd);
-            _ = self.total_created.fetchSub(1, .monotonic);
-        };
+        _ = self.total_created.fetchSub(1, .monotonic);
     }
 
     pub fn deinit(self: *HashSocketPool) void {

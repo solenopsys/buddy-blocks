@@ -77,7 +77,7 @@ start_server() {
     # Wait for server to be ready
     log "Waiting for server to start..."
     for i in {1..30}; do
-        if curl -s http://localhost:10001/ > /dev/null 2>&1; then
+        if curl -s http://localhost:8081/ > /dev/null 2>&1; then
             log_success "Server started successfully"
             sleep 1  # Extra second for stability
             return 0
@@ -147,7 +147,7 @@ run_test() {
     cd "$SERVER_DIR/tests"
 
     log "Pushing $TEST_COUNT objects..."
-    if go run rps.go -op=load -count=$TEST_COUNT -file="$PUSHED_FILE" -url="http://localhost:10001"; then
+    if go run rps.go -op=load -count=$TEST_COUNT -file="$PUSHED_FILE" -url="http://localhost:8081"; then
         log_success "Data load completed"
     else
         log_error "Data load failed"
@@ -184,7 +184,7 @@ run_test() {
     log "Checking $PUSHED_COUNT objects..."
 
     cd "$SERVER_DIR/tests"
-    if ! go run rps.go -op=check -file="$PUSHED_FILE" -url="http://localhost:10001"; then
+    if ! go run rps.go -op=check -file="$PUSHED_FILE" -url="http://localhost:8081"; then
         log_error "Data verification failed"
         stop_server
         log "\n=========================================="

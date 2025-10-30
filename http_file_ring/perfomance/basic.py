@@ -4,7 +4,7 @@ import hashlib
 import random
 import sys
 
-SERVER_URL = "http://localhost:8080"
+SERVER_URL = "http://localhost:8081"
 
 # Получаем размер блока из аргумента или используем 4KB по умолчанию
 # Допустимые размеры: 4KB, 8KB, 16KB, 32KB, 64KB, 128KB, 256KB, 512KB

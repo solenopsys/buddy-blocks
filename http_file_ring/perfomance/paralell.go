@@ -16,12 +16,12 @@ import (
 )
 
 var (
-	SERVER_URL   = "http://localhost:8080"
-	BLOCK_SIZE   = 4096
-	ITERATIONS   = 1000
-	REQ_TIMEOUT  = 10 * time.Second
-	NUM_WORKERS  = 16  // Количество параллельных горутин
-	NUM_BLOCKS   = 100 // Количество уникальных блоков
+	SERVER_URL  = "http://localhost:8080"
+	BLOCK_SIZE  = 4096*2*2*2*2*2*2*2 - 256
+	ITERATIONS  = 100
+	REQ_TIMEOUT = 10 * time.Second
+	NUM_WORKERS = 16  // Количество параллельных горутин
+	NUM_BLOCKS  = 100 // Количество уникальных блоков
 )
 
 func main() {

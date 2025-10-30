@@ -25,5 +25,5 @@ RUN mkdir -p /data
 # Expose port
 EXPOSE 10001
 
-USER 1000 
+USER 1000
 CMD ["/app/buddy-blocks"]

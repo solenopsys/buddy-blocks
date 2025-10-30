@@ -55,4 +55,7 @@ splice(socket→pipe1)
   - onBlockAddressRequest(hash: [32]u8)-> {block_num: u64, size_index: u8} - передается хеш, возвращается номер блока и размер
 
 
-  zig build -Doptimize=ReleaseFast
+zig build --Dmusl=true -Doptimize=ReleaseFast
+ podman build -t http_file_ring -f Containerfile .
+
+ podman run -d --name http_file_ring --privileged -p 8080:8080 -v ./data:/data:Z http_file_ring

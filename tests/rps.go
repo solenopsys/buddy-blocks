@@ -94,9 +94,16 @@ func newHTTPClient(cfg config) *http.Client {
 
 func generateRandomBlock(sizeIdx int, seed int64) blockRecord {
 	size := blockSizes[sizeIdx]
-	data := make([]byte, size)
 
 	r := rand.New(rand.NewSource(seed))
+
+	// In 50% of cases, reduce the block size by 256 bytes
+	// This tests partial block writes (data_size < block_size)
+	if r.Intn(2) == 0 && size > 256 {
+		size -= 256
+	}
+
+	data := make([]byte, size)
 	r.Read(data)
 
 	sum := sha256.Sum256(data)
@@ -408,12 +415,13 @@ func runCheck(client *http.Client, cfg config) {
 					os.Exit(1)
 				}
 
-				// Verify size
+				// Verify size - block can be either full size or reduced by 256 bytes
 				expectedSize := blockSizes[entry.sizeIdx]
-				if len(data) != expectedSize {
+				altSize := expectedSize - 256
+				if len(data) != expectedSize && len(data) != altSize {
 					atomic.AddUint64(&failedChecked, 1)
-					fmt.Printf("SIZE MISMATCH for %s! Expected: %d, Got: %d\n",
-						entry.hash, expectedSize, len(data))
+					fmt.Printf("SIZE MISMATCH for %s! Expected: %d or %d, Got: %d\n",
+						entry.hash, expectedSize, altSize, len(data))
 					fmt.Printf("\n✗ CHECK FAILED - stopping on first error\n")
 					os.Exit(1)
 				}

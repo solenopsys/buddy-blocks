@@ -1,0 +1,23 @@
+FROM alpine:3.19
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    libgcc \
+    libstdc++
+
+# Create app directory
+WORKDIR /app
+
+# Copy the binary
+COPY zig-out/bin/http_file_ring-musl /app/http_file_ring
+
+# Create data directories
+RUN mkdir -p /data
+
+# Expose port
+EXPOSE 8080
+
+ENV STORAGE_FILE=/data/storage.dat
+
+USER 1000
+CMD ["/app/http_file_ring"]

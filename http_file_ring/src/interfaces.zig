@@ -12,6 +12,7 @@ pub const OpType = enum {
     pipeline, // общий контекст для всех операций pipeline
     read_block, // чтение блока для GET
     send_response, // отправка ответа
+    poll_socket, // ожидание данных на socket (POLL_ADD)
 };
 
 /// Какая операция завершилась
@@ -22,7 +23,7 @@ pub const PipelineOp = enum(u8) {
     splice_to_hash = 3,
 };
 
-/// Состояние pipeline операций
+/// Состояние pipeline операций (chunked processing)
 pub const PipelineState = struct {
     // Дескрипторы pipe
     pipe1_read: i32,
@@ -33,12 +34,29 @@ pub const PipelineState = struct {
     // Hash socket для этого запроса
     hash_socket: i32,
 
+    // HTTP контекст (для отправки ответа клиенту)
+    conn_fd: i32 = -1,
+    block_info: BlockInfo = .{ .block_num = 0 },
+
+    // Параметры для chunked processing
+    file_offset: u64 = 0,
+    total_length: usize = 0,
+
+    // Прогресс по операциям (сколько байт каждая операция обработала)
+    tee_completed: usize = 0,
+    file_completed: usize = 0,
+    hash_completed: usize = 0,
+
+    // Offset следующего chunk'а для которого можно запустить TEE
+    // (запускаем только после того как оба splice предыдущего chunk'а завершились)
+    next_tee_offset: usize = 0,
+
+    // Флаг что splice в hash уже запущен (чтобы не запускать дважды)
+    hash_splice_started: bool = false,
+
     // Буфер для полученного хеша
     hash: [32]u8 = undefined,
     hash_ready: bool = false,
-
-    // Битовая маска завершенных операций (биты 1,2,3 для tee, file, hash)
-    completed_mask: u8 = 0,
 
     // Ошибка если была
     has_error: bool = false,
@@ -53,14 +71,11 @@ pub const PipelineState = struct {
         };
     }
 
-    pub fn markComplete(self: *PipelineState, op: PipelineOp) void {
-        const shift: u3 = @intCast(@intFromEnum(op));
-        self.completed_mask |= @as(u8, 1) << shift;
-    }
-
     pub fn isComplete(self: *PipelineState) bool {
-        // Проверяем что завершились tee (bit 1), file (bit 2), hash (bit 3)
-        return (self.completed_mask & 0b1110) == 0b1110;
+        // Все три операции должны обработать все данные
+        return self.tee_completed == self.total_length and
+               self.file_completed == self.total_length and
+               self.hash_completed == self.total_length;
     }
 
     pub fn cleanup(self: *PipelineState) void {

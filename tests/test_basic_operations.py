@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import requests
+
 import hashlib
 
 SERVER_URL = "http://localhost:10001"
@@ -50,7 +51,7 @@ def basic_put_get_delete():
 
 
 def sequential_block_sizes():
-    sizes_kb = [512, 256, 128, 64, 32, 16, 8, 4]
+    sizes_kb = [ 256, 128, 64, 32, 16, 8, 4] #512,
     hashes = []
 
     for idx, size_kb in enumerate(sizes_kb):

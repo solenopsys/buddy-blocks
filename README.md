@@ -383,6 +383,7 @@ cd tests && python3 test_basic_operations.py
 
 start
  LD_LIBRARY_PATH=../zig-lmdbx/zig-out/lib ./zig-out/bin/buddy-blocks-gnu  
+ pasta 
 
 
 ## License

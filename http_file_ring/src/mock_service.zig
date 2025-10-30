@@ -65,23 +65,37 @@ pub const MockWorkerService = struct {
         var stored_info = block_info;
         stored_info.data_size = data_size;
 
-        // Аллоцируем память для ключа (иначе key_buf уничтожится при выходе)
-        const key = self.allocator.alloc(u8, 64) catch |err| {
-            std.debug.print("MockWorkerService: Failed to allocate key: {}\n", .{err});
-            return;
-        };
-        @memcpy(key, &key_buf);
+        // Проверяем, есть ли уже такой ключ
+        const existing = self.hash_map.getKey(&key_buf);
+        if (existing) |existing_key| {
+            // Ключ уже существует - НЕ обновляем! Оставляем первый записанный блок
+            // Это избегает проблемы когда одинаковые данные записываются в разные блоки
+            const existing_info = self.hash_map.get(existing_key).?;
+            std.debug.print(
+                "Duplicate hash {s} ignored: existing block_num {d}, new block_num {d} (wasted), total mapped {d}\n",
+                .{ existing_key, existing_info.block_num, stored_info.block_num, self.hash_map.count() },
+            );
+            // Новый блок с тем же содержимым останется записанным в файл, но не будет доступен по хешу
+            // Это не идеально, но для теста приемлемо
+        } else {
+            // Новый ключ - аллоцируем память
+            const key = self.allocator.alloc(u8, 64) catch |err| {
+                std.debug.print("MockWorkerService: Failed to allocate key: {}\n", .{err});
+                return;
+            };
+            @memcpy(key, &key_buf);
 
-        self.hash_map.put(key, stored_info) catch |err| {
-            std.debug.print("MockWorkerService: Failed to store hash mapping: {}\n", .{err});
-            self.allocator.free(key);
-            return;
-        };
+            self.hash_map.put(key, stored_info) catch |err| {
+                std.debug.print("MockWorkerService: Failed to store hash mapping: {}\n", .{err});
+                self.allocator.free(key);
+                return;
+            };
 
-        std.debug.print(
-            "Stored hash {s} -> block_num {d}, size_index {d}, data_size {d}, total mapped {d}\n",
-            .{ key, stored_info.block_num, stored_info.size_index, stored_info.data_size, self.hash_map.count() },
-        );
+            std.debug.print(
+                "Stored hash {s} -> block_num {d}, size_index {d}, data_size {d}, total mapped {d}\n",
+                .{ key, stored_info.block_num, stored_info.size_index, stored_info.data_size, self.hash_map.count() },
+            );
+        }
     }
 
     fn onFreeBlockRequest(ptr: *anyopaque, hash: [32]u8) BlockInfo {

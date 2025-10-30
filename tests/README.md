@@ -78,3 +78,4 @@ SERVER_URL = "http://localhost:10001"
 - Перед запуском тестов убедитесь, что сервер FastBlock запущен
 - Для корректной работы требуется доступ к `/tmp/fastblock.data` и `/tmp/fastblock_meta.db`
 - Тесты автоматически очищают созданные данные после завершения
+zig build -Dmusl=true -Doptimize=ReleaseFast

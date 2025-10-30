@@ -9,14 +9,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring = Ring.init(256) catch |err| {
-        std.debug.print("ERROR: Failed to initialize io_uring: {}\n", .{err});
+    var ring = Ring.init(256) catch {
         std.process.exit(1);
     };
     defer ring.deinit();
 
-    var file_storage = FileStorage.init(&ring, "storage.dat") catch |err| {
-        std.debug.print("ERROR: Failed to open storage file: {}\n", .{err});
+    const storage_path = std.posix.getenv("STORAGE_FILE") orelse "/data/storage.dat";
+    var file_storage = FileStorage.init(&ring, storage_path) catch |err| {
+        std.debug.print("ERROR: Failed to open storage file '{s}': {}\n", .{ storage_path, err });
         std.process.exit(1);
     };
     defer file_storage.deinit();
@@ -36,7 +36,7 @@ pub fn main() !void {
     defer server.deinit();
 
     std.debug.print("Server starting on port 8080...\n", .{});
-    std.debug.print("Storage file: storage.dat\n", .{});
+    std.debug.print("Storage file: {s}\n", .{storage_path});
 
     server.run() catch |err| {
         std.debug.print("ERROR: Server run failed: {}\n", .{err});

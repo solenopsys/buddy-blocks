@@ -13,3 +13,8 @@ pub const OpType = interfaces.OpType;
 pub const PipelineOp = interfaces.PipelineOp;
 pub const PipelineState = interfaces.PipelineState;
 pub const WorkerServiceError = interfaces.WorkerServiceError;
+
+// Import tests
+test {
+    _ = @import("http.zig");
+}

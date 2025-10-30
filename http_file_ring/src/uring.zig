@@ -7,9 +7,16 @@ pub const Ring = struct {
     ring: IoUring,
 
     pub fn init(entries: u13) !Ring {
-        return Ring{
-            .ring = try IoUring.init(entries, 0),
+        const ring = IoUring.init(entries, 0) catch |err| {
+            std.debug.print("ERROR: io_uring initialization failed: {}\n", .{err});
+            std.debug.print("  This may be caused by:\n", .{});
+            std.debug.print("  - Kernel version too old (need Linux 5.1+)\n", .{});
+            std.debug.print("  - Missing SYS_CAP_IPC_LOCK capability\n", .{});
+            std.debug.print("  - Insufficient memlock limits\n", .{});
+            std.debug.print("  Try running with: --privileged or --cap-add=SYS_ADMIN --ulimit memlock=-1:-1\n", .{});
+            return err;
         };
+        return Ring{ .ring = ring };
     }
 
     pub fn deinit(self: *Ring) void {
@@ -73,5 +80,26 @@ pub const Ring = struct {
     /// Read data
     pub fn queueRead(self: *Ring, fd: i32, buffer: []u8, offset: u64, user_data: u64) !void {
         _ = try self.ring.read(user_data, fd, .{ .buffer = buffer }, offset);
+    }
+
+    /// Poll for events on fd
+    pub fn queuePoll(self: *Ring, fd: i32, poll_mask: u32, user_data: u64) !void {
+        const sqe = try self.ring.get_sqe();
+        sqe.* = .{
+            .opcode = .POLL_ADD,
+            .flags = 0,
+            .ioprio = 0,
+            .fd = fd,
+            .off = 0,
+            .addr = 0,
+            .len = 0,
+            .rw_flags = poll_mask,
+            .user_data = user_data,
+            .buf_index = 0,
+            .personality = 0,
+            .splice_fd_in = 0,
+            .addr3 = 0,
+            .resv = 0,
+        };
     }
 };
